@@ -1,10 +1,11 @@
 import { useRef, useState } from 'react';
 
-const SUPPORTED_FORMATS = ['mp4', 'mov', 'avi', 'flv', 'm4v', 'webm'];
+const FALLBACK_FORMATS = ['mp4', 'mov', 'avi', 'flv', 'm4v', 'webm'];
 
-export default function Dropzone({ file, onSelect }) {
+export default function Dropzone({ file, onSelect, supportedFormats }) {
   const inputRef = useRef(null);
   const [dragging, setDragging] = useState(false);
+  const formats = supportedFormats || FALLBACK_FORMATS;
 
   function handleFiles(fileList) {
     const picked = fileList?.[0];
@@ -31,12 +32,12 @@ export default function Dropzone({ file, onSelect }) {
         >
           <div className="dropzone-label">Drop a video here, or click to browse</div>
           <div className="dropzone-formats">
-            {SUPPORTED_FORMATS.map((f) => f.toUpperCase()).join(' · ')}
+            {formats.map((f) => f.toUpperCase()).join(' · ')}
           </div>
           <input
             ref={inputRef}
             type="file"
-            accept={SUPPORTED_FORMATS.map((f) => `.${f}`).join(',')}
+            accept={formats.map((f) => `.${f}`).join(',')}
             style={{ display: 'none' }}
             onChange={(e) => handleFiles(e.target.files)}
           />
@@ -53,4 +54,4 @@ export default function Dropzone({ file, onSelect }) {
   );
 }
 
-export { SUPPORTED_FORMATS };
+export { FALLBACK_FORMATS };

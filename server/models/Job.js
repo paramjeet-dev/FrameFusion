@@ -26,10 +26,17 @@ const jobSchema = new mongoose.Schema(
     inputPath: { type: String, required: true },
     outputPath: { type: String, default: null },
     errorMessage: { type: String, default: null },
+    completedAt: { type: Date, default: null },
 
     // Set true by the cleanup job once the processed output file has been
     // deleted from disk. The Job record itself is kept for history.
     expired: { type: Boolean, default: false },
+
+    // Per-job retention override (hours). Falls back to CLEANUP_MAX_AGE_HOURS
+    // when null. deleteOnDownload triggers immediate cleanup after first
+    // successful download rather than waiting for the sweep.
+    retentionHours: { type: Number, default: null },
+    deleteOnDownload: { type: Boolean, default: true },
   },
   { timestamps: true }
 );

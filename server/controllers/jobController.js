@@ -12,7 +12,8 @@ const UPLOAD_DIR = path.join(__dirname, '..', process.env.UPLOAD_DIR || 'uploads
 // on disk, so this never re-transfers the video bytes.
 async function createJob(req, res) {
   try {
-    const { uploadId, originalFilename, operation, outputFormat, options = {} } = req.body || {};
+    const { uploadId, originalFilename, operation, outputFormat, options = {}, retentionHours, deleteOnDownload } =
+      req.body || {};
 
     if (!uploadId || typeof uploadId !== 'string') {
       return res.status(400).json({ error: 'uploadId is required (upload the file via POST /api/uploads first)' });
@@ -29,6 +30,9 @@ async function createJob(req, res) {
     }
 
     const validationErrors = validateJobInput({ operation, outputFormat, options });
+    if (retentionHours !== undefined && (!Number.isFinite(retentionHours) || retentionHours <= 0)) {
+      validationErrors.push('retentionHours must be a positive number');
+    }
     if (validationErrors.length > 0) {
       return res.status(400).json({ error: validationErrors.join('; ') });
     }
@@ -44,6 +48,8 @@ async function createJob(req, res) {
       options,
       status: 'pending',
       inputPath,
+      retentionHours: retentionHours ?? null,
+      deleteOnDownload: deleteOnDownload !== false,
     });
 
     // Fire-and-forget async processing; client polls for status.
@@ -58,6 +64,7 @@ async function createJob(req, res) {
 async function processJobAsync(jobId, inputPath) {
   try {
     await Job.findByIdAndUpdate(jobId, { status: 'processing', progress: 0 });
+    console.log(`[job ${jobId}] processing started`);
 
     const job = await Job.findById(jobId);
 
@@ -75,12 +82,15 @@ async function processJobAsync(jobId, inputPath) {
       status: 'done',
       progress: 100,
       outputPath,
+      completedAt: new Date(),
     });
+    console.log(`[job ${jobId}] done -> ${outputPath}`);
   } catch (err) {
     await Job.findByIdAndUpdate(jobId, {
       status: 'failed',
       errorMessage: err.message,
     });
+    console.error(`[job ${jobId}] failed:`, err.message);
   } finally {
     // The original upload is no longer needed once processing succeeds or
     // fails — delete it right away rather than waiting for the cleanup job.
@@ -99,6 +109,8 @@ function serializeJob(job) {
     outputFormat: job.outputFormat,
     createdAt: job.createdAt,
     expired: job.expired,
+    retentionHours: job.retentionHours,
+    deleteOnDownload: job.deleteOnDownload,
     downloadUrl: job.status === 'done' && !job.expired ? `/api/jobs/${job._id}/download` : null,
   };
 }
@@ -110,12 +122,29 @@ async function getJobStatus(req, res) {
   return res.json(serializeJob(job));
 }
 
-// GET /api/jobs?limit=50
-// Returns recent job history, newest first, so the UI survives a page refresh.
+// GET /api/jobs?limit=20&cursor=<jobId>&search=<text>&operation=<op>
+// Cursor pagination on _id (Mongo ObjectIds sort chronologically, so this
+// doubles as a createdAt-descending cursor without a separate index).
 async function listJobs(req, res) {
-  const limit = Math.min(Number(req.query.limit) || 50, 200);
-  const jobs = await Job.find().sort({ createdAt: -1 }).limit(limit);
-  return res.json(jobs.map(serializeJob));
+  const limit = Math.min(Number(req.query.limit) || 20, 100);
+  const { cursor, search, operation } = req.query;
+
+  const filter = {};
+  if (operation) filter.operation = operation;
+  if (search) filter.originalFilename = { $regex: search.trim(), $options: 'i' };
+  if (cursor) filter._id = { $lt: cursor };
+
+  const rows = await Job.find(filter)
+    .sort({ _id: -1 })
+    .limit(limit + 1); // fetch one extra to know if there's a next page
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+
+  return res.json({
+    jobs: page.map(serializeJob),
+    nextCursor: hasMore ? page[page.length - 1]._id : null,
+  });
 }
 
 // GET /api/jobs/:id/download
@@ -127,7 +156,32 @@ async function downloadJob(req, res) {
   if (job.expired) {
     return res.status(410).json({ error: 'This file has expired and was removed from the server' });
   }
-  return res.download(job.outputPath);
+
+  const outputPath = job.outputPath;
+  res.download(outputPath, async (err) => {
+    if (err) {
+      // Client aborted or connection dropped — don't delete on a failed transfer.
+      console.error(`[job ${job._id}] download error:`, err.message);
+      return;
+    }
+    if (job.deleteOnDownload) {
+      await fs.unlink(outputPath).catch(() => {});
+      await Job.findByIdAndUpdate(job._id, { expired: true });
+    }
+  });
 }
 
-module.exports = { createJob, getJobStatus, listJobs, downloadJob };
+// DELETE /api/jobs/:id
+// Manual removal from the job log — deletes any files still on disk too.
+async function deleteJob(req, res) {
+  const job = await Job.findById(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+
+  if (job.outputPath) await fs.unlink(job.outputPath).catch(() => {});
+  if (job.inputPath) await fs.unlink(job.inputPath).catch(() => {});
+  await Job.findByIdAndDelete(job._id);
+
+  return res.status(204).send();
+}
+
+module.exports = { createJob, getJobStatus, listJobs, downloadJob, deleteJob };

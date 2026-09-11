@@ -10,6 +10,7 @@ const fs = require('fs');
 const jobRoutes = require('./routes/jobRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
 const { runCleanup } = require('./services/cleanupService');
+const { OPERATIONS, SUPPORTED_FORMATS } = require('./models/Job');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -28,6 +29,17 @@ app.use('/api/jobs', jobRoutes);
 app.use('/api/uploads', uploadRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+
+// Lets the frontend validate against real server limits instead of
+// hardcoding a second copy of them that can drift out of sync.
+app.get('/api/config', (req, res) => {
+  res.json({
+    maxFileSizeMB: Number(process.env.MAX_FILE_SIZE_MB || 500),
+    supportedFormats: SUPPORTED_FORMATS,
+    operations: OPERATIONS,
+    defaultRetentionHours: Number(process.env.CLEANUP_MAX_AGE_HOURS || 24),
+  });
+});
 
 // Error handler — gives specific messages for the most common failure modes
 // (oversized upload, unsupported format) instead of a generic 500/400.

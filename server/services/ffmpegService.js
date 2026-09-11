@@ -26,7 +26,8 @@ function runCommand(command, onProgress) {
         }
       })
       .on('end', () => resolve())
-      .on('error', (err) => reject(err));
+      .on('error', (err) => reject(err))
+      .run();
   });
 }
 

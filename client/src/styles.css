@@ -317,6 +317,42 @@ select:focus-visible,
   margin-bottom: 12px;
 }
 
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.log-toolbar .log-title {
+  margin-bottom: 0;
+  margin-right: auto;
+}
+
+.log-search {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: var(--font-sans);
+  min-width: 160px;
+}
+
+.log-toolbar select {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.log-search:focus,
+.log-toolbar select:focus {
+  border-color: var(--amber);
+}
+
 .log-empty {
   font-size: 13px;
   color: var(--text-muted);
@@ -327,7 +363,7 @@ select:focus-visible,
 
 .job-row {
   display: grid;
-  grid-template-columns: 60px 1fr 90px 120px 90px;
+  grid-template-columns: 60px 1fr 90px 120px 90px 24px;
   align-items: center;
   gap: 12px;
   padding: 10px 0;
@@ -337,10 +373,76 @@ select:focus-visible,
 
 @media (max-width: 640px) {
   .job-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr 24px;
     gap: 4px;
     padding: 14px 0;
   }
+}
+
+.job-delete {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 4px;
+  justify-self: end;
+}
+
+.job-delete:hover {
+  color: var(--error);
+}
+
+.load-more-btn {
+  display: block;
+  margin: 16px auto 0;
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--text-muted);
+  padding: 8px 20px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.load-more-btn:hover:not(:disabled) {
+  border-color: var(--amber);
+  color: var(--text);
+}
+
+.load-more-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* Toasts */
+.toast-stack {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 100;
+  max-width: 320px;
+}
+
+.toast {
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--amber);
+  padding: 12px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.toast.success {
+  border-left-color: var(--teal);
+}
+
+.toast.error {
+  border-left-color: var(--error);
 }
 
 .job-time {

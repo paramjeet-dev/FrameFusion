@@ -1,4 +1,4 @@
-const OUTPUT_FORMATS = ['mp4', 'mov', 'avi', 'flv', 'm4v', 'webm'];
+const FALLBACK_FORMATS = ['mp4', 'mov', 'avi', 'flv', 'm4v', 'webm'];
 
 function formatDuration(seconds) {
   if (!seconds) return null;
@@ -14,10 +14,18 @@ export default function OperationPanel({
   outputFormat,
   setOutputFormat,
   metadata,
+  config,
+  retentionHours,
+  setRetentionHours,
+  deleteOnDownload,
+  setDeleteOnDownload,
 }) {
   function update(key, value) {
     setOptions({ ...options, [key]: value });
   }
+
+  const outputFormats = config?.supportedFormats || FALLBACK_FORMATS;
+  const defaultRetention = config?.defaultRetentionHours || 24;
 
   return (
     <div className="options">
@@ -125,14 +133,37 @@ export default function OperationPanel({
         <div className="field">
           <label htmlFor="outputFormat">Output format</label>
           <select id="outputFormat" value={outputFormat} onChange={(e) => setOutputFormat(e.target.value)}>
-            {OUTPUT_FORMATS.map((f) => (
+            {outputFormats.map((f) => (
               <option key={f} value={f}>
                 {f}
               </option>
             ))}
           </select>
         </div>
+        <div className="field">
+          <label htmlFor="retention">Keep processed file for</label>
+          <select
+            id="retention"
+            value={retentionHours ?? 'default'}
+            onChange={(e) =>
+              setRetentionHours(e.target.value === 'default' ? null : Number(e.target.value))
+            }
+          >
+            <option value="default">Default ({defaultRetention}h)</option>
+            <option value="1">1 hour</option>
+            <option value="24">24 hours</option>
+            <option value="168">7 days</option>
+          </select>
+        </div>
       </div>
+      <label className="checkbox-row">
+        <input
+          type="checkbox"
+          checked={deleteOnDownload}
+          onChange={(e) => setDeleteOnDownload(e.target.checked)}
+        />
+        Delete file immediately after I download it
+      </label>
     </div>
   );
 }

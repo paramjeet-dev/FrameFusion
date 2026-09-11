@@ -28,15 +28,21 @@ Make sure MongoDB is running locally (or point `MONGO_URI` at Atlas/remote insta
 
 ## API
 
+### `GET /api/config`
+Returns `{ maxFileSizeMB, supportedFormats, operations, defaultRetentionHours }`. The frontend
+reads this once on load so client-side validation (file size, format) and dropdowns stay in
+sync with whatever the server actually enforces, rather than a hardcoded copy.
+
 ### `POST /api/uploads`
 Multipart form-data: `file`. Saves the file to disk and immediately probes it, in one round trip.
 Response: `{ "uploadId", "originalFilename", "durationSeconds", "sizeBytes", "width", "height", "codec" }`.
+Rate limited to 30 uploads / 15 min per IP.
 
 The frontend calls this the moment a file is selected — `uploadId` is then passed to `POST /api/jobs`
 instead of re-sending the file, so the video is only transferred over the network once.
 
 ### `POST /api/jobs`
-JSON body: `{ "uploadId", "originalFilename", "operation", "outputFormat", "options" }`
+JSON body: `{ "uploadId", "originalFilename", "operation", "outputFormat", "options", "retentionHours", "deleteOnDownload" }`
 - `uploadId` — from a prior `POST /api/uploads` call
 - `operation` — one of `resize`, `compress`, `trim`, `convert`
 - `outputFormat` — one of `mp4`, `mov`, `avi`, `flv`, `m4v`, `webm`
@@ -45,8 +51,10 @@ JSON body: `{ "uploadId", "originalFilename", "operation", "outputFormat", "opti
   - `compress`: `{ "crf": 28, "preset": "medium" }`
   - `trim`: `{ "startTime": 5, "duration": 10 }` (seconds)
   - `convert`: `{}` (outputFormat alone drives it)
+- `retentionHours` — optional; overrides `CLEANUP_MAX_AGE_HOURS` for this job's processed file
+- `deleteOnDownload` — optional, default `true`; deletes the processed file right after a successful download instead of waiting for the cleanup sweep
 
-Response: `{ "jobId", "status" }`
+Response: `{ "jobId", "status" }`. Rate limited to 20 jobs / 15 min per IP.
 
 `resize` options also accept `preserveAspectRatio` (default `true`). With one dimension set,
 the other is computed automatically; with both set and `preserveAspectRatio: true`, the video
@@ -54,15 +62,24 @@ is scaled to fit within the box without distortion. Set `false` for an exact (po
 stretched) width × height.
 
 ### `GET /api/jobs/:id`
-Response: `{ "jobId", "status", "progress", "errorMessage", "filename", "operation", "outputFormat", "createdAt", "expired", "downloadUrl" }`
+Response: `{ "jobId", "status", "progress", "errorMessage", "filename", "operation", "outputFormat", "createdAt", "expired", "retentionHours", "deleteOnDownload", "downloadUrl" }`
 
 `status` is one of `pending`, `processing`, `done`, `failed`.
 
-### `GET /api/jobs?limit=50`
-Returns recent job history (same shape as above, newest first) — used to repopulate the UI on page load.
+### `GET /api/jobs?limit=20&cursor=<jobId>&search=<text>&operation=<op>`
+Cursor-paginated job history, newest first. `nextCursor` in the response is the `jobId` to pass
+as `cursor` for the next page (`null` when there are no more). `search` matches filenames
+case-insensitively; `operation` filters exactly.
+
+Response: `{ "jobs": [...], "nextCursor": "..." | null }`
 
 ### `GET /api/jobs/:id/download`
-Streams back the processed file once `status` is `done`. Returns `410` if the file has expired and been cleaned up.
+Streams back the processed file once `status` is `done`. Returns `410` if the file has expired
+and been cleaned up. If the job's `deleteOnDownload` is `true` (the default), the file is
+deleted right after a successful transfer and the job is marked `expired`.
+
+### `DELETE /api/jobs/:id`
+Removes a job from the log and deletes any of its files still on disk.
 
 ## Frontend Setup
 ```bash
@@ -82,8 +99,18 @@ type (IBM Plex Mono) for anything measured — timecodes, percentages, filenames
 with IBM Plex Sans for labels. One amber accent marks the active/action state; teal is
 reserved only for "done".
 
-## Next Steps
-- [ ] Client-side validation of file size before upload (currently relies on server 500MB cap)
-- [ ] Consider Bull + Redis if concurrent load grows
-- [ ] Pagination on `GET /api/jobs` beyond the `limit` param (cursor-based, for real history)
-- [ ] Delete a job's processed file immediately once downloaded, instead of waiting for cleanup
+## Known Bug Fixed
+The initial FFmpeg wrapper attached `progress`/`end`/`error` listeners but never called
+`command.run()` — `fluent-ffmpeg`'s `.output()` doesn't start execution on its own, only
+`.run()` or `.save()` do. This made every job hang at `processing` / 0% forever, with no
+error surfaced (nothing had actually started). Fixed by adding `.run()` in `runCommand()`.
+
+## Next Steps (larger architecture changes, not yet built)
+- **Chunked/resumable uploads** for large files — needs a client-side chunking protocol
+  (e.g. tus) and a server-side assembly step; current uploads are single-request.
+- **Bull + Redis** for job processing — needed once concurrent load exceeds what in-process
+  async handling comfortably manages; adds a Redis dependency to the deployment.
+- **WebSocket push** instead of polling for job status — pairs naturally with the Bull/Redis
+  move, since a queue worker can emit events directly instead of the client polling.
+- **Job cancellation** — requires tracking the running `ffmpeg` child process per job so it
+  can be killed; straightforward once jobs move to a queue with per-job worker handles.

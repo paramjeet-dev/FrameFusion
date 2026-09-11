@@ -3,57 +3,77 @@ const path = require('path');
 const Job = require('../models/Job');
 
 const UPLOAD_DIR = path.join(__dirname, '..', process.env.UPLOAD_DIR || 'uploads');
-const PROCESSED_DIR = path.join(__dirname, '..', process.env.PROCESSED_DIR || 'processed');
-const MAX_AGE_HOURS = Number(process.env.CLEANUP_MAX_AGE_HOURS || 24);
+const GLOBAL_MAX_AGE_HOURS = Number(process.env.CLEANUP_MAX_AGE_HOURS || 24);
 
-async function deleteAgedFilesIn(dirPath, maxAgeMs) {
-  const deleted = [];
+/**
+ * Uploads aren't all tied to a live Job (a staged upload that never became a
+ * job has no record to check), so this sweep is plain file-age based. Once a
+ * job finishes, its own input file is deleted immediately elsewhere — this
+ * only catches orphaned staged uploads.
+ */
+async function cleanupOrphanedUploads(maxAgeMs) {
   let entries;
   try {
-    entries = await fs.readdir(dirPath);
+    entries = await fs.readdir(UPLOAD_DIR);
   } catch {
-    return deleted; // directory may not exist yet
+    return 0;
   }
 
+  let count = 0;
   for (const entry of entries) {
     if (entry === '.gitkeep') continue;
-    const fullPath = path.join(dirPath, entry);
+    const fullPath = path.join(UPLOAD_DIR, entry);
     try {
       const stat = await fs.stat(fullPath);
-      const age = Date.now() - stat.mtimeMs;
-      if (age > maxAgeMs) {
+      if (Date.now() - stat.mtimeMs > maxAgeMs) {
         await fs.unlink(fullPath);
-        deleted.push(fullPath);
+        count++;
       }
     } catch {
-      // File may have been removed concurrently; ignore.
+      // Ignore races (already deleted, etc).
     }
   }
-  return deleted;
+  return count;
 }
 
 /**
- * Deletes uploaded/processed files older than MAX_AGE_HOURS and marks the
- * corresponding Job records as `expired` so the UI can stop offering downloads.
+ * Processed outputs ARE tied to a Job, so retention can be per-job:
+ * job.retentionHours overrides the global default when set.
  */
-async function runCleanup() {
-  const maxAgeMs = MAX_AGE_HOURS * 60 * 60 * 1000;
+async function cleanupProcessedOutputs(globalMaxAgeMs) {
+  const jobs = await Job.find({ status: 'done', expired: false, outputPath: { $ne: null } });
 
-  const deletedUploads = await deleteAgedFilesIn(UPLOAD_DIR, maxAgeMs);
-  const deletedProcessed = await deleteAgedFilesIn(PROCESSED_DIR, maxAgeMs);
+  let count = 0;
+  const now = Date.now();
+  for (const job of jobs) {
+    const completedAtMs = (job.completedAt || job.createdAt).getTime();
+    const maxAgeMs =
+      job.retentionHours != null ? job.retentionHours * 60 * 60 * 1000 : globalMaxAgeMs;
 
-  if (deletedProcessed.length > 0) {
-    await Job.updateMany(
-      { outputPath: { $in: deletedProcessed } },
-      { $set: { expired: true } }
-    );
+    if (now - completedAtMs <= maxAgeMs) continue;
+
+    try {
+      await fs.unlink(job.outputPath);
+    } catch {
+      // Already gone (e.g. deleted on download) — still mark expired below.
+    }
+    job.expired = true;
+    await job.save();
+    count++;
   }
+  return count;
+}
 
-  const total = deletedUploads.length + deletedProcessed.length;
+async function runCleanup() {
+  const maxAgeMs = GLOBAL_MAX_AGE_HOURS * 60 * 60 * 1000;
+
+  const uploadsDeleted = await cleanupOrphanedUploads(maxAgeMs);
+  const processedDeleted = await cleanupProcessedOutputs(maxAgeMs);
+
+  const total = uploadsDeleted + processedDeleted;
   if (total > 0) {
     console.log(
-      `[cleanup] removed ${total} file(s) older than ${MAX_AGE_HOURS}h ` +
-        `(${deletedUploads.length} uploads, ${deletedProcessed.length} processed)`
+      `[cleanup] removed ${total} file(s): ${uploadsDeleted} orphaned uploads, ${processedDeleted} expired outputs`
     );
   }
 }
