@@ -61,6 +61,14 @@ Requires **both MongoDB and Redis** running locally (or pointed at remote instan
 docker run -p 6379:6379 redis
 ```
 
+**Note on `server/nodemon.json`:** nodemon watches the whole project directory by default,
+including `server/uploads/` and `server/processed/` — which the app itself writes to constantly
+(every chunk of a chunked upload, every processed output file). Without the ignore rules in
+`nodemon.json`, nodemon restarts mid-upload/mid-job, which surfaces to the client as "Failed to
+fetch" or "Unexpected end of JSON input" (the connection gets cut mid-response). If you ever see
+either of those with no real error in the logs, check for `[nodemon] restarting due to changes`
+in the terminal — it's easy to miss since it isn't printed as an error.
+
 ## API
 
 ### `GET /api/config`
