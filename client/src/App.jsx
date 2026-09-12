@@ -3,11 +3,12 @@ import Dropzone from './components/Dropzone';
 import OperationPanel from './components/OperationPanel';
 import JobList from './components/JobList';
 import Toasts from './components/Toasts';
-import { createJob, deleteJob, getConfig, getJobStatus, listJobs, stageUpload } from './api';
+import { cancelJob, chunkedUpload, createJob, deleteJob, getConfig, listJobs } from './api';
+import { socket } from './socket';
 
 const OPERATIONS = ['resize', 'compress', 'trim', 'convert'];
-const POLL_INTERVAL_MS = 1500;
 const SEARCH_DEBOUNCE_MS = 400;
+const TERMINAL_STATUSES = ['done', 'failed', 'cancelled'];
 
 let toastCounter = 0;
 
@@ -25,6 +26,7 @@ export default function App() {
   const [error, setError] = useState(null);
   const [metadata, setMetadata] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   const [jobs, setJobs] = useState([]);
   const [nextCursor, setNextCursor] = useState(null);
@@ -33,7 +35,6 @@ export default function App() {
   const [operationFilter, setOperationFilter] = useState('');
   const [toasts, setToasts] = useState([]);
 
-  const pollTimers = useRef({});
   const searchDebounce = useRef(null);
 
   // Server config drives client-side validation limits & format lists so
@@ -60,35 +61,31 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }
 
-  function pollJob(jobId) {
-    const timer = setInterval(async () => {
-      try {
-        const status = await getJobStatus(jobId);
-        setJobs((prev) =>
-          prev.map((j) => {
-            if (j.jobId !== jobId) return j;
-            if (j.status !== status.status && (status.status === 'done' || status.status === 'failed')) {
-              pushToast(
-                status.status === 'done'
-                  ? `${j.filename} finished processing`
-                  : `${j.filename} failed: ${status.errorMessage || 'unknown error'}`,
-                status.status === 'done' ? 'success' : 'error'
-              );
-            }
-            return { ...j, ...status };
-          })
-        );
-        if (status.status === 'done' || status.status === 'failed') {
-          clearInterval(pollTimers.current[jobId]);
-          delete pollTimers.current[jobId];
-        }
-      } catch {
-        clearInterval(pollTimers.current[jobId]);
-        delete pollTimers.current[jobId];
-      }
-    }, POLL_INTERVAL_MS);
-    pollTimers.current[jobId] = timer;
-  }
+  // Job status now arrives by push (WebSocket) instead of polling — the
+  // worker emits an update whenever a job's status or progress changes, and
+  // the server re-broadcasts it to every connected client.
+  useEffect(() => {
+    function handleUpdate(payload) {
+      setJobs((prev) =>
+        prev.map((j) => {
+          if (j.jobId !== payload.jobId) return j;
+          const justFinished = j.status !== payload.status && TERMINAL_STATUSES.includes(payload.status);
+          if (justFinished) {
+            const messages = {
+              done: `${j.filename} finished processing`,
+              failed: `${j.filename} failed: ${payload.errorMessage || 'unknown error'}`,
+              cancelled: `${j.filename} was cancelled`,
+            };
+            pushToast(messages[payload.status], payload.status === 'done' ? 'success' : 'error');
+          }
+          return { ...j, ...payload };
+        })
+      );
+    }
+
+    socket.on('job:update', handleUpdate);
+    return () => socket.off('job:update', handleUpdate);
+  }, []);
 
   async function loadJobs({ reset = false, cursor = null } = {}) {
     try {
@@ -99,12 +96,6 @@ export default function App() {
       });
       setJobs((prev) => (reset ? result.jobs : [...prev, ...result.jobs]));
       setNextCursor(result.nextCursor);
-
-      if (reset) {
-        result.jobs
-          .filter((j) => j.status === 'pending' || j.status === 'processing')
-          .forEach((j) => pollJob(j.jobId));
-      }
     } catch {
       // Non-fatal — job log just stays empty/stale.
     }
@@ -120,12 +111,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, operationFilter]);
 
-  useEffect(() => {
-    return () => {
-      Object.values(pollTimers.current).forEach(clearInterval);
-    };
-  }, []);
-
   async function handleLoadMore() {
     if (!nextCursor) return;
     setLoadingMore(true);
@@ -134,8 +119,6 @@ export default function App() {
   }
 
   async function handleDeleteJob(jobId) {
-    clearInterval(pollTimers.current[jobId]);
-    delete pollTimers.current[jobId];
     setJobs((prev) => prev.filter((j) => j.jobId !== jobId));
     try {
       await deleteJob(jobId);
@@ -144,11 +127,22 @@ export default function App() {
     }
   }
 
+  async function handleCancelJob(jobId) {
+    try {
+      await cancelJob(jobId);
+      // The worker will emit the 'cancelled' status update over the socket;
+      // no need to optimistically patch state here.
+    } catch (err) {
+      pushToast(`Couldn't cancel: ${err.message}`, 'error');
+    }
+  }
+
   async function handleFileSelect(picked) {
     setFile(picked);
     setOptions({});
     setError(null);
     setMetadata(null);
+    setUploadProgress(0);
     if (!picked) return;
 
     // Client-side checks first — no point paying for an upload we know will
@@ -170,7 +164,7 @@ export default function App() {
 
     setUploading(true);
     try {
-      const staged = await stageUpload(picked);
+      const staged = await chunkedUpload(picked, { onProgress: setUploadProgress });
       setMetadata(staged);
     } catch (err) {
       setFile(null);
@@ -243,10 +237,10 @@ export default function App() {
         },
         ...prev,
       ]);
-      pollJob(jobId);
       setFile(null);
       setOptions({});
       setMetadata(null);
+      setUploadProgress(0);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -278,7 +272,14 @@ export default function App() {
 
         <div className="main">
           <Dropzone file={file} onSelect={handleFileSelect} supportedFormats={config?.supportedFormats} />
-          {uploading && <div className="field-hint">Uploading &amp; reading video info…</div>}
+          {uploading && (
+            <div className="upload-progress">
+              <div className="field-hint">Uploading… {uploadProgress}%</div>
+              <div className="upload-bar">
+                <div className="upload-bar-fill" style={{ width: `${uploadProgress}%` }} />
+              </div>
+            </div>
+          )}
 
           <OperationPanel
             operation={operation}
@@ -310,6 +311,7 @@ export default function App() {
         onLoadMore={handleLoadMore}
         loadingMore={loadingMore}
         onDelete={handleDeleteJob}
+        onCancel={handleCancelJob}
         search={search}
         onSearchChange={setSearch}
         operationFilter={operationFilter}

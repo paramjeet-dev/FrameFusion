@@ -1,7 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
-const { createJob, getJobStatus, listJobs, downloadJob, deleteJob } = require('../controllers/jobController');
+const {
+  createJob,
+  getJobStatus,
+  listJobs,
+  downloadJob,
+  cancelJob,
+  deleteJob,
+} = require('../controllers/jobController');
 
 // Job creation kicks off real CPU work, so it gets a tighter limit than
 // simple reads: 20 jobs per 15 minutes per IP.
@@ -17,6 +24,7 @@ router.post('/', createJobLimiter, createJob);
 router.get('/', listJobs);
 router.get('/:id', getJobStatus);
 router.get('/:id/download', downloadJob);
+router.post('/:id/cancel', cancelJob);
 router.delete('/:id', deleteJob);
 
 module.exports = router;

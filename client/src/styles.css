@@ -191,6 +191,23 @@ select:focus-visible,
   color: var(--error);
 }
 
+.upload-progress {
+  margin-top: 12px;
+}
+
+.upload-bar {
+  height: 4px;
+  background: var(--line);
+  margin-top: 6px;
+  overflow: hidden;
+}
+
+.upload-bar-fill {
+  height: 100%;
+  background: var(--amber);
+  transition: width 0.2s ease;
+}
+
 /* Options */
 .options {
   margin-top: 20px;
@@ -510,6 +527,32 @@ select:focus-visible,
 .job-status.expired {
   color: var(--text-muted);
   font-style: italic;
+}
+
+.job-status.cancelled {
+  color: var(--text-muted);
+}
+
+.inflight {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cancel-link {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.cancel-link:hover {
+  color: var(--error);
 }
 
 .download-link {

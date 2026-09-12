@@ -28,6 +28,7 @@ export default function JobList({
   onLoadMore,
   loadingMore,
   onDelete,
+  onCancel,
   search,
   onSearchChange,
   operationFilter,
@@ -76,8 +77,15 @@ export default function JobList({
                 </a>
               ) : job.status === 'failed' ? (
                 'failed'
+              ) : job.status === 'cancelled' ? (
+                'cancelled'
               ) : (
-                `${job.progress}%`
+                <span className="inflight">
+                  {job.progress}%
+                  <button className="cancel-link" onClick={() => onCancel(job.jobId)}>
+                    cancel
+                  </button>
+                </span>
               )}
             </div>
             <button

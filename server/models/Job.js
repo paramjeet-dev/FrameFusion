@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const OPERATIONS = ['resize', 'compress', 'trim', 'convert'];
 const SUPPORTED_FORMATS = ['mp4', 'mov', 'avi', 'flv', 'm4v', 'webm'];
-const STATUSES = ['pending', 'processing', 'done', 'failed'];
+const STATUSES = ['pending', 'processing', 'done', 'failed', 'cancelled'];
 
 const jobSchema = new mongoose.Schema(
   {

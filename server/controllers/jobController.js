@@ -1,22 +1,25 @@
 const path = require('path');
 const fs = require('fs/promises');
 const Job = require('../models/Job');
-const { processVideo } = require('../services/ffmpegService');
 const { validateJobInput } = require('../utils/validateJobInput');
+const { serializeJob } = require('../utils/serializeJob');
+const { videoQueue } = require('../services/queue');
+const { requestCancel } = require('../services/worker');
 
 const UPLOAD_DIR = path.join(__dirname, '..', process.env.UPLOAD_DIR || 'uploads');
 
 // POST /api/jobs
-// JSON body: { uploadId, originalFilename, operation, outputFormat, options }
-// uploadId comes from a prior POST /api/uploads call — the file is already
-// on disk, so this never re-transfers the video bytes.
+// JSON body: { uploadId, originalFilename, operation, outputFormat, options, retentionHours, deleteOnDownload }
+// uploadId comes from a prior upload call — the file is already on disk, so
+// this never re-transfers the video bytes. Actual processing happens in the
+// BullMQ worker (services/worker.js), not in this request.
 async function createJob(req, res) {
   try {
     const { uploadId, originalFilename, operation, outputFormat, options = {}, retentionHours, deleteOnDownload } =
       req.body || {};
 
     if (!uploadId || typeof uploadId !== 'string') {
-      return res.status(400).json({ error: 'uploadId is required (upload the file via POST /api/uploads first)' });
+      return res.status(400).json({ error: 'uploadId is required (upload the file first)' });
     }
 
     // path.basename strips any directory traversal attempt from the id.
@@ -52,67 +55,15 @@ async function createJob(req, res) {
       deleteOnDownload: deleteOnDownload !== false,
     });
 
-    // Fire-and-forget async processing; client polls for status.
-    processJobAsync(job._id, inputPath);
+    const jobId = job._id.toString();
+    // Using the Mongo _id as the Bull job id keeps the two systems in
+    // lock-step and makes cross-referencing trivial (no separate id map).
+    await videoQueue.add('process-video', { jobId, inputPath }, { jobId });
 
     return res.status(201).json({ jobId: job._id, status: job.status });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
-}
-
-async function processJobAsync(jobId, inputPath) {
-  try {
-    await Job.findByIdAndUpdate(jobId, { status: 'processing', progress: 0 });
-    console.log(`[job ${jobId}] processing started`);
-
-    const job = await Job.findById(jobId);
-
-    const outputPath = await processVideo({
-      inputPath,
-      operation: job.operation,
-      outputFormat: job.outputFormat,
-      options: job.options,
-      onProgress: async (percent) => {
-        await Job.findByIdAndUpdate(jobId, { progress: percent });
-      },
-    });
-
-    await Job.findByIdAndUpdate(jobId, {
-      status: 'done',
-      progress: 100,
-      outputPath,
-      completedAt: new Date(),
-    });
-    console.log(`[job ${jobId}] done -> ${outputPath}`);
-  } catch (err) {
-    await Job.findByIdAndUpdate(jobId, {
-      status: 'failed',
-      errorMessage: err.message,
-    });
-    console.error(`[job ${jobId}] failed:`, err.message);
-  } finally {
-    // The original upload is no longer needed once processing succeeds or
-    // fails — delete it right away rather than waiting for the cleanup job.
-    fs.unlink(inputPath).catch(() => {});
-  }
-}
-
-function serializeJob(job) {
-  return {
-    jobId: job._id,
-    status: job.status,
-    progress: job.progress,
-    errorMessage: job.errorMessage,
-    filename: job.originalFilename,
-    operation: job.operation,
-    outputFormat: job.outputFormat,
-    createdAt: job.createdAt,
-    expired: job.expired,
-    retentionHours: job.retentionHours,
-    deleteOnDownload: job.deleteOnDownload,
-    downloadUrl: job.status === 'done' && !job.expired ? `/api/jobs/${job._id}/download` : null,
-  };
 }
 
 // GET /api/jobs/:id
@@ -171,6 +122,19 @@ async function downloadJob(req, res) {
   });
 }
 
+// POST /api/jobs/:id/cancel
+async function cancelJob(req, res) {
+  const job = await Job.findById(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+
+  if (job.status !== 'pending' && job.status !== 'processing') {
+    return res.status(400).json({ error: `Cannot cancel a job that is already ${job.status}` });
+  }
+
+  const state = requestCancel(String(job._id));
+  return res.json({ jobId: job._id, cancelRequested: true, state });
+}
+
 // DELETE /api/jobs/:id
 // Manual removal from the job log — deletes any files still on disk too.
 async function deleteJob(req, res) {
@@ -184,4 +148,4 @@ async function deleteJob(req, res) {
   return res.status(204).send();
 }
 
-module.exports = { createJob, getJobStatus, listJobs, downloadJob, deleteJob };
+module.exports = { createJob, getJobStatus, listJobs, downloadJob, cancelJob, deleteJob };

@@ -73,3 +73,54 @@ export async function stageUpload(file) {
   if (!res.ok) throw new Error(data.error || 'Failed to upload video');
   return data; // { uploadId, originalFilename, durationSeconds, sizeBytes, width, height, codec }
 }
+
+const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB per request
+
+// Splits the file into chunks and uploads them one at a time, reporting
+// percent progress as it goes. Not resumable across a page reload — see the
+// note in server/controllers/uploadController.js — but it does give real
+// upload progress and avoids one giant request for large files.
+export async function chunkedUpload(file, { onProgress } = {}) {
+  const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+
+  const initRes = await fetch('/api/uploads/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename: file.name, totalChunks }),
+  });
+  const initData = await initRes.json();
+  if (!initRes.ok) throw new Error(initData.error || 'Failed to start upload');
+  const { uploadId } = initData;
+
+  let uploadedBytes = 0;
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, file.size);
+    const chunk = file.slice(start, end);
+
+    const res = await fetch(`/api/uploads/${uploadId}/chunk/${i}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: chunk,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to upload part ${i + 1} of ${totalChunks}`);
+    }
+
+    uploadedBytes += chunk.size;
+    onProgress?.(Math.round((uploadedBytes / file.size) * 100));
+  }
+
+  const completeRes = await fetch(`/api/uploads/${uploadId}/complete`, { method: 'POST' });
+  const completeData = await completeRes.json();
+  if (!completeRes.ok) throw new Error(completeData.error || 'Failed to finalize upload');
+  return completeData; // { uploadId, originalFilename, durationSeconds, sizeBytes, width, height, codec }
+}
+
+export async function cancelJob(jobId) {
+  const res = await fetch(`${BASE}/${jobId}/cancel`, { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Failed to cancel job');
+  return data;
+}

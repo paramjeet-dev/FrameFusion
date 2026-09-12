@@ -4,46 +4,83 @@ Video utility tool to resize, compress, trim, and convert videos in mp4, mov, av
 
 ## Stack
 - **Backend:** Node.js + Express + MongoDB (Mongoose)
+- **Queue:** BullMQ + Redis — job processing runs through a queue rather than in-process
+- **Realtime:** Socket.IO — job status is pushed to clients, not polled
 - **Processing:** FFmpeg via `fluent-ffmpeg` (binary bundled through `@ffmpeg-installer/ffmpeg`, no system install needed)
-- **Frontend:** React (to be added next)
+- **Frontend:** React (Vite)
 
-## v1 Architecture Decisions
-- Jobs run **asynchronously in-process** (no Redis/Bull yet) — request returns a `jobId` immediately, frontend polls for status.
-- Files are stored **on local disk** (`server/uploads` for originals, `server/processed` for output).
-- **No auth** in v1 — open/anonymous usage.
+## Architecture
+- **Upload → job → process** is three separate steps. A file is uploaded (chunked, see below)
+  and probed for metadata first; job creation then references that file by `uploadId` and never
+  re-sends the bytes; the actual FFmpeg work happens in a BullMQ **worker**, which currently
+  runs in the same Node process as the API (`server/services/worker.js` is required by
+  `server.js`) — pulling it into a separate process later is a config change, not a rewrite.
+- **Status updates are pushed, not polled.** The worker emits progress/status changes onto an
+  in-process event bus (`server/services/jobEvents.js`); `server.js` re-broadcasts those over
+  Socket.IO to every connected client. This only works because the worker and the socket server
+  share a process — if the worker ever moves to its own process, this event bus needs to become
+  Redis pub/sub instead (Redis is already a dependency via BullMQ, so that's a small change).
+- **Cancellation** kills the in-flight `ffmpeg` child process directly. The worker keeps a
+  `Map<jobId, command>` of whatever's currently running; `POST /api/jobs/:id/cancel` looks the
+  job up and calls `.kill('SIGKILL')` on its command if it's active, or flags it so the worker
+  skips it entirely if it's still queued.
+- **No auth** — open/anonymous usage, unchanged from v1.
 
 ## File Lifecycle
-- The **original upload** is deleted immediately once its job finishes (success or failure) — no need to wait for cleanup.
-- **Processed output** is kept so it can be downloaded, then deleted by an hourly cleanup job once it's older than `CLEANUP_MAX_AGE_HOURS` (default 24h). The Job record itself is kept for history but marked `expired: true`, and `GET /api/jobs/:id/download` returns `410 Gone` for expired jobs.
+- The **original upload** is deleted immediately once its job finishes (success, failure, or cancellation).
+- **Processed output** is kept so it can be downloaded, then either:
+  - deleted immediately after a successful download if the job's `deleteOnDownload` is `true` (the default), or
+  - deleted by the hourly cleanup job once older than `CLEANUP_MAX_AGE_HOURS` (default 24h), or the job's own `retentionHours` override if set.
+  The Job record itself is kept for history but marked `expired: true`; `GET /api/jobs/:id/download` returns `410 Gone` for expired jobs.
+- **Abandoned chunked uploads** (browser closed mid-upload) are swept after 6 hours regardless of the global retention setting — there's no reason to hold a dead upload session as long as a real job.
 
 ## Backend Setup
 ```bash
 cd server
 npm install
-cp .env.example .env   # adjust MONGO_URI etc. if needed
+cp .env.example .env   # adjust MONGO_URI / REDIS_URL if needed
 npm run dev             # requires nodemon (npm install -g nodemon), or `npm start`
 ```
 
-Make sure MongoDB is running locally (or point `MONGO_URI` at Atlas/remote instance).
+Requires **both MongoDB and Redis** running locally (or pointed at remote instances via
+`MONGO_URI` / `REDIS_URL`). Redis is new as of this version — Mongo alone is no longer enough,
+since BullMQ needs it for the job queue.
+
+```bash
+# quick local Redis if you don't have one:
+docker run -p 6379:6379 redis
+```
 
 ## API
 
 ### `GET /api/config`
 Returns `{ maxFileSizeMB, supportedFormats, operations, defaultRetentionHours }`. The frontend
-reads this once on load so client-side validation (file size, format) and dropdowns stay in
-sync with whatever the server actually enforces, rather than a hardcoded copy.
+reads this once on load so client-side validation and dropdowns stay in sync with whatever the
+server actually enforces, rather than a hardcoded copy.
 
-### `POST /api/uploads`
-Multipart form-data: `file`. Saves the file to disk and immediately probes it, in one round trip.
-Response: `{ "uploadId", "originalFilename", "durationSeconds", "sizeBytes", "width", "height", "codec" }`.
-Rate limited to 30 uploads / 15 min per IP.
+### Uploads
+Two ways to get a file onto the server; both end with the same response shape:
+`{ "uploadId", "originalFilename", "durationSeconds", "sizeBytes", "width", "height", "codec" }`.
 
-The frontend calls this the moment a file is selected — `uploadId` is then passed to `POST /api/jobs`
-instead of re-sending the file, so the video is only transferred over the network once.
+- **`POST /api/uploads`** — single multipart request (`file` field). Simple, fine for small
+  files or direct API use.
+- **Chunked** (what the frontend actually uses):
+  1. `POST /api/uploads/init` — JSON `{ filename, totalChunks }` returns `{ uploadId }`
+  2. `POST /api/uploads/:uploadId/chunk/:index` — raw binary body, one request per chunk (2MB
+     chunks from the client), returns `204` per chunk
+  3. `POST /api/uploads/:uploadId/complete` — assembles the chunks in order, probes the result,
+     cleans up the chunk directory, returns the same metadata shape as above
+
+  This isn't resumable across a page reload (that needs tracking which chunks already landed,
+  which is a further step up) — but it gives real upload progress and means a single flaky
+  request doesn't fail the whole transfer.
+
+All upload endpoints are rate limited together: 300 requests / 15 min per IP (generous because
+a single chunked upload makes many requests).
 
 ### `POST /api/jobs`
 JSON body: `{ "uploadId", "originalFilename", "operation", "outputFormat", "options", "retentionHours", "deleteOnDownload" }`
-- `uploadId` — from a prior `POST /api/uploads` call
+- `uploadId` — from a prior upload call
 - `operation` — one of `resize`, `compress`, `trim`, `convert`
 - `outputFormat` — one of `mp4`, `mov`, `avi`, `flv`, `m4v`, `webm`
 - `options` — shape depends on operation:
@@ -52,34 +89,37 @@ JSON body: `{ "uploadId", "originalFilename", "operation", "outputFormat", "opti
   - `trim`: `{ "startTime": 5, "duration": 10 }` (seconds)
   - `convert`: `{}` (outputFormat alone drives it)
 - `retentionHours` — optional; overrides `CLEANUP_MAX_AGE_HOURS` for this job's processed file
-- `deleteOnDownload` — optional, default `true`; deletes the processed file right after a successful download instead of waiting for the cleanup sweep
+- `deleteOnDownload` — optional, default `true`
 
-Response: `{ "jobId", "status" }`. Rate limited to 20 jobs / 15 min per IP.
-
-`resize` options also accept `preserveAspectRatio` (default `true`). With one dimension set,
-the other is computed automatically; with both set and `preserveAspectRatio: true`, the video
-is scaled to fit within the box without distortion. Set `false` for an exact (possibly
-stretched) width × height.
+Response: `{ "jobId", "status" }`. This enqueues the job onto BullMQ and returns immediately —
+it does not wait for processing. Rate limited to 20 jobs / 15 min per IP.
 
 ### `GET /api/jobs/:id`
 Response: `{ "jobId", "status", "progress", "errorMessage", "filename", "operation", "outputFormat", "createdAt", "expired", "retentionHours", "deleteOnDownload", "downloadUrl" }`
 
-`status` is one of `pending`, `processing`, `done`, `failed`.
+`status` is one of `pending`, `processing`, `done`, `failed`, `cancelled`.
 
 ### `GET /api/jobs?limit=20&cursor=<jobId>&search=<text>&operation=<op>`
-Cursor-paginated job history, newest first. `nextCursor` in the response is the `jobId` to pass
-as `cursor` for the next page (`null` when there are no more). `search` matches filenames
-case-insensitively; `operation` filters exactly.
-
-Response: `{ "jobs": [...], "nextCursor": "..." | null }`
+Cursor-paginated job history, newest first. `nextCursor` is the `jobId` to pass as `cursor` for
+the next page (`null` when there are no more). `search` matches filenames case-insensitively;
+`operation` filters exactly.
 
 ### `GET /api/jobs/:id/download`
-Streams back the processed file once `status` is `done`. Returns `410` if the file has expired
-and been cleaned up. If the job's `deleteOnDownload` is `true` (the default), the file is
-deleted right after a successful transfer and the job is marked `expired`.
+Streams the processed file. `410` if expired. Deletes the file immediately after a successful
+transfer if `deleteOnDownload` is `true`.
+
+### `POST /api/jobs/:id/cancel`
+Cancels a `pending` or `processing` job. Kills the ffmpeg process if it's actively running.
+Response: `{ "jobId", "cancelRequested": true, "state": "active" | "queued" }`.
 
 ### `DELETE /api/jobs/:id`
 Removes a job from the log and deletes any of its files still on disk.
+
+### WebSocket: `job:update`
+Emitted to all connected clients whenever a job's status or progress changes. Payload is either
+a lightweight progress tick (`{ jobId, progress, status: "processing" }`) or the full job object
+(same shape as `GET /api/jobs/:id`) on every status transition. The frontend doesn't poll at all
+for job status anymore — this is the only source of live updates after the initial history load.
 
 ## Frontend Setup
 ```bash
@@ -88,29 +128,27 @@ npm install
 npm run dev   # runs on http://localhost:5173, proxies /api to :5000
 ```
 
-Open http://localhost:5173 — pick an operation on the left rail (resize, compress, trim,
-convert), drop a video, set the operation's options and output format, and hit Run. The
-job log at the bottom polls status every 1.5s and shows a download link once a job is done.
+The Socket.IO client connects directly to `http://localhost:5000` in dev (Vite's `/api` proxy
+only covers HTTP, not the WebSocket upgrade) — see `client/src/socket.js`.
+
+Open http://localhost:5173 — pick an operation on the left rail, drop a video (uploads in 2MB
+chunks with a progress bar), set the operation's options and output format, and hit Run. The job
+log at the bottom updates live via WebSocket, supports search/filter/pagination, and lets you
+cancel an in-flight job or delete any entry.
 
 ## Design Notes (client)
-The UI treats the tool like a deck/control panel rather than a generic form: a left rail
-for picking the operation, a VU-meter style segmented progress bar per job, and monospace
-type (IBM Plex Mono) for anything measured — timecodes, percentages, filenames — paired
-with IBM Plex Sans for labels. One amber accent marks the active/action state; teal is
-reserved only for "done".
+The UI treats the tool like a deck/control panel rather than a generic form: a left rail for
+picking the operation, a VU-meter style segmented progress bar per job, and monospace type (IBM
+Plex Mono) for anything measured — timecodes, percentages, filenames — paired with IBM Plex Sans
+for labels. One amber accent marks the active/action state; teal is reserved only for "done".
 
-## Known Bug Fixed
-The initial FFmpeg wrapper attached `progress`/`end`/`error` listeners but never called
-`command.run()` — `fluent-ffmpeg`'s `.output()` doesn't start execution on its own, only
-`.run()` or `.save()` do. This made every job hang at `processing` / 0% forever, with no
-error surfaced (nothing had actually started). Fixed by adding `.run()` in `runCommand()`.
+## Known Bug Fixed (earlier version)
+The original FFmpeg wrapper attached `progress`/`end`/`error` listeners but never called
+`command.run()` — `fluent-ffmpeg`'s `.output()` doesn't start execution on its own. This made
+every job hang at `processing` / 0% forever. Fixed by adding `.run()` in `runCommand()`.
 
-## Next Steps (larger architecture changes, not yet built)
-- **Chunked/resumable uploads** for large files — needs a client-side chunking protocol
-  (e.g. tus) and a server-side assembly step; current uploads are single-request.
-- **Bull + Redis** for job processing — needed once concurrent load exceeds what in-process
-  async handling comfortably manages; adds a Redis dependency to the deployment.
-- **WebSocket push** instead of polling for job status — pairs naturally with the Bull/Redis
-  move, since a queue worker can emit events directly instead of the client polling.
-- **Job cancellation** — requires tracking the running `ffmpeg` child process per job so it
-  can be killed; straightforward once jobs move to a queue with per-job worker handles.
+## Next Steps
+- [ ] True resumable uploads (resume after a page reload, not just mid-session retry)
+- [ ] Move the worker to its own process/deployment once load justifies it (event bus becomes Redis pub/sub instead of a local EventEmitter)
+- [ ] Per-job concurrency limits / priority in the BullMQ queue
+- [ ] Reconnection handling: if the socket drops mid-job and reconnects, the client currently just waits for the next push — a reconciliation fetch on reconnect would close that gap

@@ -35,7 +35,7 @@ function runCommand(command, onProgress) {
  * operation: 'resize' | 'compress' | 'trim' | 'convert'
  * options depend on operation (see Job model comments)
  */
-async function processVideo({ inputPath, operation, outputFormat, options = {}, onProgress }) {
+async function processVideo({ inputPath, operation, outputFormat, options = {}, onProgress, registerCommand }) {
   const outPath = outputPathFor(outputFormat);
   const command = ffmpeg(inputPath).output(outPath);
 
@@ -90,6 +90,10 @@ async function processVideo({ inputPath, operation, outputFormat, options = {}, 
     default:
       throw new Error(`Unknown operation: ${operation}`);
   }
+
+  // Hand the command back to the caller (before .run()) so it can be killed
+  // mid-flight for cancellation — runCommand() below is what calls .run().
+  if (registerCommand) registerCommand(command);
 
   await runCommand(command, onProgress);
   return outPath;

@@ -1,5 +1,7 @@
 require('dotenv').config();
 const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const cron = require('node-cron');
@@ -11,15 +13,32 @@ const jobRoutes = require('./routes/jobRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
 const { runCleanup } = require('./services/cleanupService');
 const { OPERATIONS, SUPPORTED_FORMATS } = require('./models/Job');
+const jobEvents = require('./services/jobEvents');
+// Requiring the worker starts it — video jobs are processed in this same
+// process, pulled from the BullMQ queue backed by Redis.
+require('./services/worker');
 
 const app = express();
+const httpServer = http.createServer(app);
+const io = new Server(httpServer, { cors: { origin: '*' } });
+
 const PORT = process.env.PORT || 5000;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/framefusion';
 
-// Ensure upload/processed directories exist
-['uploads', 'processed'].forEach((dir) => {
+// Ensure upload/processed directories exist (including the chunk-upload staging area)
+['uploads', 'uploads/chunks', 'processed'].forEach((dir) => {
   const fullPath = path.join(__dirname, dir);
   if (!fs.existsSync(fullPath)) fs.mkdirSync(fullPath, { recursive: true });
+});
+
+// Re-broadcast worker job events to all connected clients. Simple global
+// broadcast rather than per-job rooms — job volume here doesn't warrant the
+// extra bookkeeping, and clients just ignore updates for jobs they don't have.
+jobEvents.on('update', (payload) => io.emit('job:update', payload));
+
+io.on('connection', (socket) => {
+  console.log(`[socket] client connected: ${socket.id}`);
+  socket.on('disconnect', () => console.log(`[socket] client disconnected: ${socket.id}`));
 });
 
 app.use(cors());
@@ -60,15 +79,18 @@ mongoose
   .connect(MONGO_URI)
   .then(() => {
     console.log('MongoDB connected');
-    app.listen(PORT, () => console.log(`FrameFusion server running on port ${PORT}`));
+    httpServer.listen(PORT, () =>
+      console.log(`FrameFusion server (API + WebSocket) running on port ${PORT}`)
+    );
 
     // Run once on boot, then hourly — deletes files older than
-    // CLEANUP_MAX_AGE_HOURS and marks their Jobs as expired.
+    // CLEANUP_MAX_AGE_HOURS (or a job's own retentionHours override) and
+    // marks their Jobs as expired.
     runCleanup().catch((err) => console.error('[cleanup] initial run failed:', err.message));
     cron.schedule('0 * * * *', () => {
       runCleanup().catch((err) => console.error('[cleanup] scheduled run failed:', err.message));
     });
-    console.log(`[cleanup] scheduled hourly, max age ${CLEANUP_MAX_AGE_HOURS}h`);
+    console.log(`[cleanup] scheduled hourly, default max age ${CLEANUP_MAX_AGE_HOURS}h`);
   })
   .catch((err) => {
     console.error('MongoDB connection error:', err.message);
