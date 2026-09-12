@@ -1,22 +1,5 @@
 import { downloadUrlFor } from '../api';
 
-const SEGMENTS = 12;
-const OPERATIONS = ['resize', 'compress', 'trim', 'convert'];
-
-function Meter({ progress, status }) {
-  const filledCount = Math.round((progress / 100) * SEGMENTS);
-  return (
-    <div className="meter">
-      {Array.from({ length: SEGMENTS }).map((_, i) => (
-        <div
-          key={i}
-          className={`meter-seg ${i < filledCount ? (status === 'done' ? 'done' : 'filled') : ''}`}
-        />
-      ))}
-    </div>
-  );
-}
-
 function formatClock(value) {
   const date = value instanceof Date ? value : new Date(value);
   return date.toTimeString().slice(0, 5);
@@ -31,8 +14,9 @@ export default function JobList({
   onCancel,
   search,
   onSearchChange,
-  operationFilter,
-  onOperationFilterChange,
+  formatFilter,
+  onFormatFilterChange,
+  supportedFormats,
 }) {
   return (
     <div className="log">
@@ -45,11 +29,11 @@ export default function JobList({
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
         />
-        <select value={operationFilter} onChange={(e) => onOperationFilterChange(e.target.value)}>
-          <option value="">All operations</option>
-          {OPERATIONS.map((op) => (
-            <option key={op} value={op}>
-              {op}
+        <select value={formatFilter} onChange={(e) => onFormatFilterChange(e.target.value)}>
+          <option value="">All formats</option>
+          {(supportedFormats || []).map((f) => (
+            <option key={f} value={f}>
+              {f.toUpperCase()}
             </option>
           ))}
         </select>
@@ -65,9 +49,14 @@ export default function JobList({
               {job.filename}
               <span className="arrow">→</span>
               {job.outputFormat}
+              <div className="job-transforms">{job.transforms}</div>
             </div>
-            <div className="job-op">{job.operation}</div>
-            <Meter progress={job.progress} status={job.status} />
+            <div className="meter">
+              <div
+                className={`meter-fill ${job.status === 'done' ? 'done' : ''}`}
+                style={{ width: `${job.progress}%` }}
+              />
+            </div>
             <div className={`job-status ${job.status} ${job.expired ? 'expired' : ''}`}>
               {job.status === 'done' && job.expired ? (
                 'expired'

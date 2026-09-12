@@ -3,7 +3,6 @@ const BASE = '/api/jobs';
 export async function createJob({
   uploadId,
   originalFilename,
-  operation,
   outputFormat,
   options,
   retentionHours,
@@ -15,7 +14,6 @@ export async function createJob({
     body: JSON.stringify({
       uploadId,
       originalFilename,
-      operation,
       outputFormat,
       options,
       retentionHours,
@@ -38,11 +36,11 @@ export function downloadUrlFor(jobId) {
   return `${BASE}/${jobId}/download`;
 }
 
-export async function listJobs({ cursor, search, operation, limit } = {}) {
+export async function listJobs({ cursor, search, format, limit } = {}) {
   const params = new URLSearchParams();
   if (cursor) params.set('cursor', cursor);
   if (search) params.set('search', search);
-  if (operation) params.set('operation', operation);
+  if (format) params.set('format', format);
   if (limit) params.set('limit', limit);
 
   const res = await fetch(`${BASE}?${params.toString()}`);
@@ -62,7 +60,7 @@ export async function deleteJob(jobId) {
 export async function getConfig() {
   const res = await fetch('/api/config');
   if (!res.ok) throw new Error('Failed to load server config');
-  return res.json(); // { maxFileSizeMB, supportedFormats, operations, defaultRetentionHours }
+  return res.json(); // { maxFileSizeMB, supportedFormats, defaultRetentionHours }
 }
 
 export async function stageUpload(file) {

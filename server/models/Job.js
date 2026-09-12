@@ -1,6 +1,5 @@
 const mongoose = require('mongoose');
 
-const OPERATIONS = ['resize', 'compress', 'trim', 'convert'];
 const SUPPORTED_FORMATS = ['mp4', 'mov', 'avi', 'flv', 'm4v', 'webm'];
 const STATUSES = ['pending', 'processing', 'done', 'failed', 'cancelled'];
 
@@ -11,13 +10,16 @@ const jobSchema = new mongoose.Schema(
     inputFormat: { type: String, enum: SUPPORTED_FORMATS, required: true },
     outputFormat: { type: String, enum: SUPPORTED_FORMATS, required: true },
 
-    operation: { type: String, enum: OPERATIONS, required: true },
-
-    // Operation-specific options, kept flexible on purpose:
-    // resize -> { width, height }
-    // compress -> { crf, preset }
-    // trim -> { startTime, endTime }
-    // convert -> {} (just uses outputFormat)
+    // A job is a single unified export, not one operation picked from a
+    // list — any combination of resize/quality/trim can apply in one pass.
+    // Shape:
+    //   {
+    //     resize: { width, height, preserveAspectRatio } | null,
+    //     quality: 0-100 (maps to CRF; 100 = best quality/least compression),
+    //     trim: { startTime, duration } | null,
+    //   }
+    // `resize`/`trim` are null when that transform isn't requested at all
+    // (i.e. keep original resolution / keep full length).
     options: { type: mongoose.Schema.Types.Mixed, default: {} },
 
     status: { type: String, enum: STATUSES, default: 'pending' },
@@ -42,5 +44,4 @@ const jobSchema = new mongoose.Schema(
 );
 
 module.exports = mongoose.model('Job', jobSchema);
-module.exports.OPERATIONS = OPERATIONS;
 module.exports.SUPPORTED_FORMATS = SUPPORTED_FORMATS;

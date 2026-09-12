@@ -12,7 +12,7 @@ const fs = require('fs');
 const jobRoutes = require('./routes/jobRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
 const { runCleanup } = require('./services/cleanupService');
-const { OPERATIONS, SUPPORTED_FORMATS } = require('./models/Job');
+const { SUPPORTED_FORMATS } = require('./models/Job');
 const jobEvents = require('./services/jobEvents');
 // Requiring the worker starts it — video jobs are processed in this same
 // process, pulled from the BullMQ queue backed by Redis.
@@ -55,7 +55,6 @@ app.get('/api/config', (req, res) => {
   res.json({
     maxFileSizeMB: Number(process.env.MAX_FILE_SIZE_MB || 500),
     supportedFormats: SUPPORTED_FORMATS,
-    operations: OPERATIONS,
     defaultRetentionHours: Number(process.env.CLEANUP_MAX_AGE_HOURS || 24),
   });
 });

@@ -14,7 +14,7 @@ export default function Dropzone({ file, onSelect, supportedFormats }) {
   }
 
   return (
-    <div>
+    <div className="card dropzone-card">
       {!file ? (
         <div
           className={`dropzone ${dragging ? 'dragging' : ''}`}
@@ -30,10 +30,20 @@ export default function Dropzone({ file, onSelect, supportedFormats }) {
             handleFiles(e.dataTransfer.files);
           }}
         >
-          <div className="dropzone-label">Drop a video here, or click to browse</div>
-          <div className="dropzone-formats">
-            {formats.map((f) => f.toUpperCase()).join(' · ')}
+          <div className="dropzone-icon">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path
+                d="M12 16V4M12 4L7 9M12 4L17 9"
+                stroke="#fff"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <path d="M4 16V18a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
+            </svg>
           </div>
+          <div className="dropzone-label">Drag &amp; Drop or click to Browse</div>
+          <div className="dropzone-formats">Supports: {formats.map((f) => f.toUpperCase()).join(', ')}</div>
           <input
             ref={inputRef}
             type="file"

@@ -15,6 +15,20 @@ function outputPathFor(outputFormat) {
 }
 
 /**
+ * Maps the frontend's 0-100 "quality" slider to a codec-appropriate CRF.
+ * The two codecs use different scales (x264: 0 best–51 worst, usable range
+ * roughly 18-40; VP9: 0 best–63 worst, usable range roughly 15-35), so the
+ * mapping isn't identical between them.
+ */
+function qualityToCrf(quality, codec) {
+  const q = Math.min(100, Math.max(0, quality));
+  if (codec === 'vp9') {
+    return Math.round(15 + (1 - q / 100) * 20); // 100 -> 15 (best), 0 -> 35
+  }
+  return Math.round(18 + (1 - q / 100) * 22); // 100 -> 18 (best), 0 -> 40
+}
+
+/**
  * Runs an ffmpeg command and reports progress via the onProgress callback (0-100).
  */
 function runCommand(command, onProgress) {
@@ -32,63 +46,58 @@ function runCommand(command, onProgress) {
 }
 
 /**
- * operation: 'resize' | 'compress' | 'trim' | 'convert'
- * options depend on operation (see Job model comments)
+ * A job is a single unified export — resize, quality, and trim are each
+ * independently optional and combined into one ffmpeg command, rather than
+ * picking exactly one transform to run.
+ *
+ * options:
+ *   resize: { width, height, preserveAspectRatio } | null/undefined — no resize if omitted
+ *   quality: 0-100 (default 100) — always applied, maps to a codec-specific CRF
+ *   trim: { startTime, duration } | null/undefined — no trim if omitted
  */
-async function processVideo({ inputPath, operation, outputFormat, options = {}, onProgress, registerCommand }) {
+async function processVideo({ inputPath, outputFormat, options = {}, onProgress, registerCommand }) {
+  const { resize, quality = 100, trim } = options;
   const outPath = outputPathFor(outputFormat);
   const command = ffmpeg(inputPath).output(outPath);
 
-  switch (operation) {
-    case 'resize': {
-      const { width, height, preserveAspectRatio = true } = options;
-      if (!width && !height) {
-        throw new Error('resize requires at least one of width or height');
-      }
-
-      // -2 (rather than -1) keeps the computed dimension even, which libx264
-      // requires for yuv420p output.
-      let scaleFilter;
-      if (!preserveAspectRatio && width && height) {
-        // Exact dimensions, may distort the image.
-        scaleFilter = `scale=${width}:${height}`;
-      } else if (width && height) {
-        // Fit within the given box, preserving aspect ratio (no cropping/padding).
-        scaleFilter = `scale=${width}:${height}:force_original_aspect_ratio=decrease`;
-      } else if (width) {
-        scaleFilter = `scale=${width}:-2`;
-      } else {
-        scaleFilter = `scale=-2:${height}`;
-      }
-      command.videoFilters(scaleFilter);
-      break;
+  if (resize) {
+    const { width, height, preserveAspectRatio = true } = resize;
+    // -2 (rather than -1) keeps the computed dimension even, which both
+    // libx264 and libvpx-vp9 require for standard chroma subsampling.
+    let scaleFilter;
+    if (!preserveAspectRatio && width && height) {
+      scaleFilter = `scale=${width}:${height}`; // exact, may distort
+    } else if (width && height) {
+      scaleFilter = `scale=${width}:${height}:force_original_aspect_ratio=decrease`; // fit within box
+    } else if (width) {
+      scaleFilter = `scale=${width}:-2`;
+    } else {
+      scaleFilter = `scale=-2:${height}`;
     }
+    command.videoFilters(scaleFilter);
+  }
 
-    case 'compress': {
-      // CRF: lower = higher quality/larger file. 23 is a sane default.
-      const crf = options.crf ?? 28;
-      const preset = options.preset || 'medium';
-      command.videoCodec('libx264').outputOptions([`-crf ${crf}`, `-preset ${preset}`]);
-      break;
-    }
+  if (trim) {
+    const { startTime, duration } = trim;
+    command.setStartTime(startTime).setDuration(duration);
+  }
 
-    case 'trim': {
-      const { startTime, duration } = options;
-      if (startTime === undefined || duration === undefined) {
-        throw new Error('trim requires startTime and duration (in seconds)');
-      }
-      command.setStartTime(startTime).setDuration(duration);
-      break;
-    }
-
-    case 'convert': {
-      // Just letting the output extension drive the container/codec choice.
-      // fluent-ffmpeg infers codec from output extension in most cases.
-      break;
-    }
-
-    default:
-      throw new Error(`Unknown operation: ${operation}`);
+  // Codec choice depends on the output container — libx264 doesn't mux into
+  // webm, and VP9's default encoder settings are notoriously slow without
+  // explicit speed flags (a likely cause if a "convert to webm" job ever
+  // felt stuck-slow rather than actually hung).
+  if (outputFormat === 'webm') {
+    const crf = qualityToCrf(quality, 'vp9');
+    command
+      .videoCodec('libvpx-vp9')
+      .audioCodec('libopus')
+      .outputOptions([`-crf ${crf}`, '-b:v 0', '-deadline good', '-cpu-used 4', '-row-mt 1']);
+  } else {
+    const crf = qualityToCrf(quality, 'x264');
+    command
+      .videoCodec('libx264')
+      .audioCodec('aac')
+      .outputOptions([`-crf ${crf}`, '-preset medium', '-pix_fmt yuv420p']);
   }
 
   // Hand the command back to the caller (before .run()) so it can be killed
@@ -120,4 +129,4 @@ function getMetadata(inputPath) {
   });
 }
 
-module.exports = { processVideo, getMetadata };
+module.exports = { processVideo, getMetadata, qualityToCrf };

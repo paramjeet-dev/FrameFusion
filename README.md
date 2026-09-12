@@ -10,6 +10,12 @@ Video utility tool to resize, compress, trim, and convert videos in mp4, mov, av
 - **Frontend:** React (Vite)
 
 ## Architecture
+- **A job is a single unified export, not one operation picked from a list.** Resize, quality,
+  and trim are each independently optional and combine into one ffmpeg command — you can resize
+  *and* trim *and* set quality in the same pass, or none of them (a plain format convert). This
+  replaced an earlier "pick resize OR compress OR trim OR convert" model; the reference UI
+  exposes all three simultaneously, which is also just a better way to build this — see
+  `server/models/Job.js` and `server/services/ffmpegService.js`.
 - **Upload → job → process** is three separate steps. A file is uploaded (chunked, see below)
   and probed for metadata first; job creation then references that file by `uploadId` and never
   re-sends the bytes; the actual FFmpeg work happens in a BullMQ **worker**, which currently
@@ -24,15 +30,20 @@ Video utility tool to resize, compress, trim, and convert videos in mp4, mov, av
   `Map<jobId, command>` of whatever's currently running; `POST /api/jobs/:id/cancel` looks the
   job up and calls `.kill('SIGKILL')` on its command if it's active, or flags it so the worker
   skips it entirely if it's still queued.
+- **Codec selection is format-aware.** `webm` output uses `libvpx-vp9` + `libopus` with explicit
+  speed flags (`-deadline good -cpu-used 4 -row-mt 1`); everything else uses `libx264` + `aac`.
+  The old version always forced `libx264` regardless of container, which is invalid for webm and
+  would have hit VP9's notoriously slow default settings if it had ever gotten that far — fixed
+  while rebuilding this rather than left as a latent bug.
 - **No auth** — open/anonymous usage, unchanged from v1.
 
 ## File Lifecycle
 - The **original upload** is deleted immediately once its job finishes (success, failure, or cancellation).
 - **Processed output** is kept so it can be downloaded, then either:
   - deleted immediately after a successful download if the job's `deleteOnDownload` is `true` (the default), or
-  - deleted by the hourly cleanup job once older than `CLEANUP_MAX_AGE_HOURS` (default 24h), or the job's own `retentionHours` override if set.
+  - deleted by the hourly cleanup job once older than `CLEANUP_MAX_AGE_HOURS` (default 24h), or the job's own `retentionHours` override if set (both tucked under "Advanced options" in the UI, since they're secondary to the main export controls).
   The Job record itself is kept for history but marked `expired: true`; `GET /api/jobs/:id/download` returns `410 Gone` for expired jobs.
-- **Abandoned chunked uploads** (browser closed mid-upload) are swept after 6 hours regardless of the global retention setting — there's no reason to hold a dead upload session as long as a real job.
+- **Abandoned chunked uploads** (browser closed mid-upload) are swept after 6 hours regardless of the global retention setting.
 
 ## Backend Setup
 ```bash
@@ -43,8 +54,7 @@ npm run dev             # requires nodemon (npm install -g nodemon), or `npm sta
 ```
 
 Requires **both MongoDB and Redis** running locally (or pointed at remote instances via
-`MONGO_URI` / `REDIS_URL`). Redis is new as of this version — Mongo alone is no longer enough,
-since BullMQ needs it for the job queue.
+`MONGO_URI` / `REDIS_URL`).
 
 ```bash
 # quick local Redis if you don't have one:
@@ -54,72 +64,64 @@ docker run -p 6379:6379 redis
 ## API
 
 ### `GET /api/config`
-Returns `{ maxFileSizeMB, supportedFormats, operations, defaultRetentionHours }`. The frontend
-reads this once on load so client-side validation and dropdowns stay in sync with whatever the
-server actually enforces, rather than a hardcoded copy.
+Returns `{ maxFileSizeMB, supportedFormats, defaultRetentionHours }`. The frontend reads this
+once on load so client-side validation and dropdowns stay in sync with the server.
 
 ### Uploads
 Two ways to get a file onto the server; both end with the same response shape:
 `{ "uploadId", "originalFilename", "durationSeconds", "sizeBytes", "width", "height", "codec" }`.
 
-- **`POST /api/uploads`** — single multipart request (`file` field). Simple, fine for small
-  files or direct API use.
+- **`POST /api/uploads`** — single multipart request (`file` field).
 - **Chunked** (what the frontend actually uses):
   1. `POST /api/uploads/init` — JSON `{ filename, totalChunks }` returns `{ uploadId }`
   2. `POST /api/uploads/:uploadId/chunk/:index` — raw binary body, one request per chunk (2MB
      chunks from the client), returns `204` per chunk
   3. `POST /api/uploads/:uploadId/complete` — assembles the chunks in order, probes the result,
-     cleans up the chunk directory, returns the same metadata shape as above
+     returns the same metadata shape as above
 
-  This isn't resumable across a page reload (that needs tracking which chunks already landed,
-  which is a further step up) — but it gives real upload progress and means a single flaky
-  request doesn't fail the whole transfer.
+  Not resumable across a page reload — but real upload progress, and a single flaky request
+  doesn't fail the whole transfer.
 
-All upload endpoints are rate limited together: 300 requests / 15 min per IP (generous because
-a single chunked upload makes many requests).
+All upload endpoints are rate limited together: 300 requests / 15 min per IP.
 
 ### `POST /api/jobs`
-JSON body: `{ "uploadId", "originalFilename", "operation", "outputFormat", "options", "retentionHours", "deleteOnDownload" }`
+JSON body: `{ "uploadId", "originalFilename", "outputFormat", "options", "retentionHours", "deleteOnDownload" }`
 - `uploadId` — from a prior upload call
-- `operation` — one of `resize`, `compress`, `trim`, `convert`
 - `outputFormat` — one of `mp4`, `mov`, `avi`, `flv`, `m4v`, `webm`
-- `options` — shape depends on operation:
-  - `resize`: `{ "width": 1280, "height": 720, "preserveAspectRatio": true }` (at least one of width/height required)
-  - `compress`: `{ "crf": 28, "preset": "medium" }`
-  - `trim`: `{ "startTime": 5, "duration": 10 }` (seconds)
-  - `convert`: `{}` (outputFormat alone drives it)
+- `options` — any combination, all optional except quality (which always applies):
+  - `resize`: `{ "width": 1280, "height": 720, "preserveAspectRatio": true }` or `null`/omitted to keep the source resolution
+  - `quality`: `0-100`, default `100` — maps to a codec-appropriate CRF (see `qualityToCrf()` in `ffmpegService.js`)
+  - `trim`: `{ "startTime": 5, "duration": 10 }` (seconds) or `null`/omitted to keep the full length
 - `retentionHours` — optional; overrides `CLEANUP_MAX_AGE_HOURS` for this job's processed file
 - `deleteOnDownload` — optional, default `true`
 
-Response: `{ "jobId", "status" }`. This enqueues the job onto BullMQ and returns immediately —
-it does not wait for processing. Rate limited to 20 jobs / 15 min per IP.
+Response: `{ "jobId", "status" }`. Enqueues onto BullMQ and returns immediately. Rate limited to
+20 jobs / 15 min per IP.
 
 ### `GET /api/jobs/:id`
-Response: `{ "jobId", "status", "progress", "errorMessage", "filename", "operation", "outputFormat", "createdAt", "expired", "retentionHours", "deleteOnDownload", "downloadUrl" }`
+Response: `{ "jobId", "status", "progress", "errorMessage", "filename", "transforms", "outputFormat", "createdAt", "expired", "retentionHours", "deleteOnDownload", "downloadUrl" }`
+
+`transforms` is a short human-readable summary of what the job actually did (e.g. `"resize · quality 60 · trim"`, or `"convert"` if none of the optional transforms were used) — there's no single `operation` field anymore since a job can combine any mix.
 
 `status` is one of `pending`, `processing`, `done`, `failed`, `cancelled`.
 
-### `GET /api/jobs?limit=20&cursor=<jobId>&search=<text>&operation=<op>`
-Cursor-paginated job history, newest first. `nextCursor` is the `jobId` to pass as `cursor` for
-the next page (`null` when there are no more). `search` matches filenames case-insensitively;
-`operation` filters exactly.
+### `GET /api/jobs?limit=20&cursor=<jobId>&search=<text>&format=<ext>`
+Cursor-paginated job history, newest first. `search` matches filenames case-insensitively;
+`format` filters by output format exactly (replaces the old `operation` filter, which no longer
+makes sense as a discrete concept).
 
 ### `GET /api/jobs/:id/download`
 Streams the processed file. `410` if expired. Deletes the file immediately after a successful
 transfer if `deleteOnDownload` is `true`.
 
 ### `POST /api/jobs/:id/cancel`
-Cancels a `pending` or `processing` job. Kills the ffmpeg process if it's actively running.
-Response: `{ "jobId", "cancelRequested": true, "state": "active" | "queued" }`.
+Cancels a `pending` or `processing` job. Response: `{ "jobId", "cancelRequested": true, "state": "active" | "queued" }`.
 
 ### `DELETE /api/jobs/:id`
 Removes a job from the log and deletes any of its files still on disk.
 
 ### WebSocket: `job:update`
-Emitted to all connected clients whenever a job's status or progress changes. Payload is either
-a lightweight progress tick (`{ jobId, progress, status: "processing" }`) or the full job object
-(same shape as `GET /api/jobs/:id`) on every status transition. The frontend doesn't poll at all
-for job status anymore — this is the only source of live updates after the initial history load.
+Emitted to all connected clients on every status/progress change — the frontend doesn't poll at all.
 
 ## Frontend Setup
 ```bash
@@ -131,16 +133,27 @@ npm run dev   # runs on http://localhost:5173, proxies /api to :5000
 The Socket.IO client connects directly to `http://localhost:5000` in dev (Vite's `/api` proxy
 only covers HTTP, not the WebSocket upgrade) — see `client/src/socket.js`.
 
-Open http://localhost:5173 — pick an operation on the left rail, drop a video (uploads in 2MB
-chunks with a progress bar), set the operation's options and output format, and hit Run. The job
-log at the bottom updates live via WebSocket, supports search/filter/pagination, and lets you
-cancel an in-flight job or delete any entry.
+## Design
+Redesigned to match a reference UI the user provided: a light theme with a purple accent
+(`#5b4fe8`), card-based layout, and — the bigger change — a single unified export panel instead
+of picking one operation from a list. Layout:
+- **Top row:** a video preview card (an actual thumbnail frame extracted client-side via
+  `<video>` + `<canvas>`, not a static icon — the reference used a static mockup image here,
+  this grabs the real first frame) with resolution/duration/codec/filename overlaid, next to the
+  drag-and-drop zone.
+- **Below:** Resolution + Quality (slider) + Duration (start/end as h:m:s) on the left; Format +
+  Ratio + a progress bar + Save on the right, with retention/deleteOnDownload tucked under an
+  "Advanced options" disclosure so the main panel stays uncluttered.
+- **Ratio presets** (16:9, 9:16, 1:1, 4:3, 3:4, or Variable) recompute height from width live;
+  "Variable" keeps the source aspect ratio locked while letting either field drive the other.
 
-## Design Notes (client)
-The UI treats the tool like a deck/control panel rather than a generic form: a left rail for
-picking the operation, a VU-meter style segmented progress bar per job, and monospace type (IBM
-Plex Mono) for anything measured — timecodes, percentages, filenames — paired with IBM Plex Sans
-for labels. One amber accent marks the active/action state; teal is reserved only for "done".
+One deliberate deviation from the reference: it mocks up OS-style window chrome (traffic-light
+buttons, minimize/maximize). This is a web app, not a desktop shell, so that's skipped rather
+than faked — non-functional buttons that look clickable are worth avoiding on principle.
+
+Typography is Inter for UI text with IBM Plex Mono reserved for anything measured (timecodes,
+resolution, percentages, filenames) — a small distinctive touch carried over from the previous
+dark-theme design rather than a pure reference copy.
 
 ## Known Bug Fixed (earlier version)
 The original FFmpeg wrapper attached `progress`/`end`/`error` listeners but never called
@@ -151,4 +164,5 @@ every job hang at `processing` / 0% forever. Fixed by adding `.run()` in `runCom
 - [ ] True resumable uploads (resume after a page reload, not just mid-session retry)
 - [ ] Move the worker to its own process/deployment once load justifies it (event bus becomes Redis pub/sub instead of a local EventEmitter)
 - [ ] Per-job concurrency limits / priority in the BullMQ queue
-- [ ] Reconnection handling: if the socket drops mid-job and reconnects, the client currently just waits for the next push — a reconciliation fetch on reconnect would close that gap
+- [ ] Reconnection handling: a reconciliation fetch on socket reconnect, in case updates were missed while disconnected
+- [ ] Live preview of trim range against the actual video (currently just numeric h:m:s inputs)

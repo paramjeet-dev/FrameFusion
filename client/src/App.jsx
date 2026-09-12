@@ -1,55 +1,65 @@
 import { useEffect, useRef, useState } from 'react';
 import Dropzone from './components/Dropzone';
-import OperationPanel from './components/OperationPanel';
+import VideoPreview from './components/VideoPreview';
+import ExportControls, { RATIOS } from './components/ExportControls';
 import JobList from './components/JobList';
 import Toasts from './components/Toasts';
 import { cancelJob, chunkedUpload, createJob, deleteJob, getConfig, listJobs } from './api';
 import { socket } from './socket';
 
-const OPERATIONS = ['resize', 'compress', 'trim', 'convert'];
 const SEARCH_DEBOUNCE_MS = 400;
 const TERMINAL_STATUSES = ['done', 'failed', 'cancelled'];
 
 let toastCounter = 0;
 
+function secondsToHMS(totalSeconds) {
+  const s = Math.max(0, Math.floor(totalSeconds || 0));
+  return { h: Math.floor(s / 3600), m: Math.floor((s % 3600) / 60), s: s % 60 };
+}
+
+function hmsToSeconds({ h, m, s }) {
+  return (h || 0) * 3600 + (m || 0) * 60 + (s || 0);
+}
+
 export default function App() {
   const [config, setConfig] = useState(null);
 
-  const [operation, setOperation] = useState('compress');
   const [file, setFile] = useState(null);
-  const [options, setOptions] = useState({});
-  const [outputFormat, setOutputFormat] = useState('mp4');
-  const [retentionHours, setRetentionHours] = useState(null);
-  const [deleteOnDownload, setDeleteOnDownload] = useState(true);
-
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState(null);
   const [metadata, setMetadata] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+
+  const [resizeWidth, setResizeWidth] = useState(0);
+  const [resizeHeight, setResizeHeight] = useState(0);
+  const [ratio, setRatio] = useState('variable');
+  const [quality, setQuality] = useState(100);
+  const [trimStart, setTrimStart] = useState({ h: 0, m: 0, s: 0 });
+  const [trimEnd, setTrimEnd] = useState({ h: 0, m: 0, s: 0 });
+  const [outputFormat, setOutputFormat] = useState('mp4');
+  const [retentionHours, setRetentionHours] = useState(null);
+  const [deleteOnDownload, setDeleteOnDownload] = useState(true);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
 
   const [jobs, setJobs] = useState([]);
   const [nextCursor, setNextCursor] = useState(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [search, setSearch] = useState('');
-  const [operationFilter, setOperationFilter] = useState('');
+  const [formatFilter, setFormatFilter] = useState('');
   const [toasts, setToasts] = useState([]);
 
   const searchDebounce = useRef(null);
 
-  // Server config drives client-side validation limits & format lists so
-  // they never drift out of sync with what the backend actually enforces.
   useEffect(() => {
     getConfig()
-      .then(setConfig)
+      .then((c) => {
+        setConfig(c);
+        setOutputFormat((prev) => (c.supportedFormats.includes(prev) ? prev : c.supportedFormats[0]));
+      })
       .catch(() => setConfig(null));
   }, []);
-
-  function selectOperation(op) {
-    setOperation(op);
-    setOptions({});
-    setError(null);
-  }
 
   function pushToast(message, type = 'info') {
     const id = ++toastCounter;
@@ -61,9 +71,7 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }
 
-  // Job status now arrives by push (WebSocket) instead of polling — the
-  // worker emits an update whenever a job's status or progress changes, and
-  // the server re-broadcasts it to every connected client.
+  // Job status arrives by WebSocket push, not polling.
   useEffect(() => {
     function handleUpdate(payload) {
       setJobs((prev) =>
@@ -82,7 +90,6 @@ export default function App() {
         })
       );
     }
-
     socket.on('job:update', handleUpdate);
     return () => socket.off('job:update', handleUpdate);
   }, []);
@@ -92,7 +99,7 @@ export default function App() {
       const result = await listJobs({
         cursor,
         search: search || undefined,
-        operation: operationFilter || undefined,
+        format: formatFilter || undefined,
       });
       setJobs((prev) => (reset ? result.jobs : [...prev, ...result.jobs]));
       setNextCursor(result.nextCursor);
@@ -101,15 +108,12 @@ export default function App() {
     }
   }
 
-  // Initial load, and reload (from scratch) whenever filters change.
   useEffect(() => {
     if (searchDebounce.current) clearTimeout(searchDebounce.current);
-    searchDebounce.current = setTimeout(() => {
-      loadJobs({ reset: true });
-    }, SEARCH_DEBOUNCE_MS);
+    searchDebounce.current = setTimeout(() => loadJobs({ reset: true }), SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(searchDebounce.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, operationFilter]);
+  }, [search, formatFilter]);
 
   async function handleLoadMore() {
     if (!nextCursor) return;
@@ -130,23 +134,27 @@ export default function App() {
   async function handleCancelJob(jobId) {
     try {
       await cancelJob(jobId);
-      // The worker will emit the 'cancelled' status update over the socket;
-      // no need to optimistically patch state here.
     } catch (err) {
       pushToast(`Couldn't cancel: ${err.message}`, 'error');
     }
   }
 
+  function resetExportOptions(meta) {
+    setResizeWidth(meta.width || 0);
+    setResizeHeight(meta.height || 0);
+    setRatio('variable');
+    setQuality(100);
+    setTrimStart({ h: 0, m: 0, s: 0 });
+    setTrimEnd(secondsToHMS(meta.durationSeconds));
+  }
+
   async function handleFileSelect(picked) {
     setFile(picked);
-    setOptions({});
     setError(null);
     setMetadata(null);
     setUploadProgress(0);
     if (!picked) return;
 
-    // Client-side checks first — no point paying for an upload we know will
-    // be rejected server-side.
     if (config) {
       const ext = picked.name.split('.').pop()?.toLowerCase();
       if (!config.supportedFormats.includes(ext)) {
@@ -166,6 +174,7 @@ export default function App() {
     try {
       const staged = await chunkedUpload(picked, { onProgress: setUploadProgress });
       setMetadata(staged);
+      resetExportOptions(staged);
     } catch (err) {
       setFile(null);
       setError(err.message);
@@ -174,30 +183,43 @@ export default function App() {
     }
   }
 
-  function validateOptionsClientSide() {
-    if (operation === 'resize') {
-      if (!options.width && !options.height) return 'Set at least a width or a height.';
-      if (options.width !== undefined && options.width <= 0) return 'Width must be positive.';
-      if (options.height !== undefined && options.height <= 0) return 'Height must be positive.';
+  // Keeping width/height in sync with whichever aspect ratio is active is
+  // the one bit of real logic in this screen — everything else is a plain
+  // controlled input.
+  function handleWidthChange(newWidth) {
+    setResizeWidth(newWidth);
+    if (ratio !== 'variable') {
+      setResizeHeight(Math.round(newWidth / RATIOS[ratio]));
+    } else if (metadata?.width && metadata?.height) {
+      setResizeHeight(Math.round((newWidth * metadata.height) / metadata.width));
     }
-    if (operation === 'compress') {
-      if (options.crf !== undefined && (options.crf < 0 || options.crf > 51)) {
-        return 'Quality (CRF) must be between 0 and 51.';
-      }
+  }
+
+  function handleHeightChange(newHeight) {
+    setResizeHeight(newHeight);
+    if (ratio === 'variable' && metadata?.width && metadata?.height) {
+      setResizeWidth(Math.round((newHeight * metadata.width) / metadata.height));
     }
-    if (operation === 'trim') {
-      if (options.startTime === undefined || !options.duration) {
-        return 'Set both start time and duration.';
-      }
-      if (options.startTime < 0 || options.duration <= 0) {
-        return 'Start time and duration must be positive.';
-      }
-      if (
-        metadata?.durationSeconds &&
-        options.startTime + options.duration > metadata.durationSeconds + 0.5
-      ) {
-        return `That runs past the source length (${Math.round(metadata.durationSeconds)}s).`;
-      }
+  }
+
+  function handleRatioChange(newRatio) {
+    setRatio(newRatio);
+    if (newRatio !== 'variable') {
+      setResizeHeight(Math.round(resizeWidth / RATIOS[newRatio]));
+    } else if (metadata?.width && metadata?.height) {
+      setResizeHeight(Math.round((resizeWidth * metadata.height) / metadata.width));
+    }
+  }
+
+  function validateClientSide() {
+    if (!resizeWidth || !resizeHeight) return 'Resolution must be greater than zero.';
+    if (quality < 0 || quality > 100) return 'Quality must be between 0 and 100.';
+
+    const startSeconds = hmsToSeconds(trimStart);
+    const endSeconds = hmsToSeconds(trimEnd);
+    if (endSeconds <= startSeconds) return 'Duration end must be after the start.';
+    if (metadata?.durationSeconds && endSeconds > metadata.durationSeconds + 0.5) {
+      return `That runs past the source length (${Math.round(metadata.durationSeconds)}s).`;
     }
     return null;
   }
@@ -207,11 +229,25 @@ export default function App() {
       setError('Choose a video file first.');
       return;
     }
-    const clientError = validateOptionsClientSide();
+    const clientError = validateClientSide();
     if (clientError) {
       setError(clientError);
       return;
     }
+
+    const resizeChanged = resizeWidth !== metadata.width || resizeHeight !== metadata.height;
+    const startSeconds = hmsToSeconds(trimStart);
+    const endSeconds = hmsToSeconds(trimEnd);
+    const trimChanged =
+      startSeconds > 0.01 || (metadata.durationSeconds && Math.abs(endSeconds - metadata.durationSeconds) > 0.5);
+
+    const options = {
+      resize: resizeChanged
+        ? { width: resizeWidth, height: resizeHeight, preserveAspectRatio: ratio === 'variable' }
+        : null,
+      quality,
+      trim: trimChanged ? { startTime: startSeconds, duration: endSeconds - startSeconds } : null,
+    };
 
     setSubmitting(true);
     setError(null);
@@ -219,7 +255,6 @@ export default function App() {
       const { jobId, status } = await createJob({
         uploadId: metadata.uploadId,
         originalFilename: metadata.originalFilename || file.name,
-        operation,
         outputFormat,
         options,
         retentionHours: retentionHours ?? undefined,
@@ -231,14 +266,15 @@ export default function App() {
           status,
           progress: 0,
           filename: file.name,
-          operation,
+          transforms: [options.resize && 'resize', options.quality < 100 && `quality ${options.quality}`, options.trim && 'trim']
+            .filter(Boolean)
+            .join(' · ') || 'convert',
           outputFormat,
           createdAt: new Date().toISOString(),
         },
         ...prev,
       ]);
       setFile(null);
-      setOptions({});
       setMetadata(null);
       setUploadProgress(0);
     } catch (err) {
@@ -248,62 +284,57 @@ export default function App() {
     }
   }
 
+  const canRun = Boolean(file && metadata?.uploadId) && !submitting && !uploading;
+
   return (
     <div className="app">
       <div className="header">
+        <div className="logo-mark">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M4 5l16 7-16 7V5z" fill="#fff" />
+          </svg>
+        </div>
         <h1 className="wordmark">
           Frame<span>Fusion</span>
         </h1>
-        <div className="tagline">resize · compress · trim · convert</div>
+        <div className="tagline">resize · quality · trim · convert — one export</div>
       </div>
 
-      <div className="deck">
-        <div className="rail">
-          {OPERATIONS.map((op) => (
-            <button
-              key={op}
-              className={`rail-item ${operation === op ? 'active' : ''}`}
-              onClick={() => selectOperation(op)}
-            >
-              {op}
-            </button>
-          ))}
-        </div>
-
-        <div className="main">
-          <Dropzone file={file} onSelect={handleFileSelect} supportedFormats={config?.supportedFormats} />
-          {uploading && (
-            <div className="upload-progress">
-              <div className="field-hint">Uploading… {uploadProgress}%</div>
-              <div className="upload-bar">
-                <div className="upload-bar-fill" style={{ width: `${uploadProgress}%` }} />
-              </div>
-            </div>
-          )}
-
-          <OperationPanel
-            operation={operation}
-            options={options}
-            setOptions={setOptions}
-            outputFormat={outputFormat}
-            setOutputFormat={setOutputFormat}
-            metadata={metadata}
-            config={config}
-            retentionHours={retentionHours}
-            setRetentionHours={setRetentionHours}
-            deleteOnDownload={deleteOnDownload}
-            setDeleteOnDownload={setDeleteOnDownload}
-          />
-
-          <div className="run-row">
-            {error && <span className="error-text">{error}</span>}
-            <button className="run-btn" onClick={handleRun} disabled={submitting || uploading || !metadata?.uploadId}>
-              <span className="play-icon" />
-              {submitting ? 'Starting…' : 'Run'}
-            </button>
-          </div>
-        </div>
+      <div className="top-grid">
+        <VideoPreview file={file} metadata={metadata} />
+        <Dropzone file={file} onSelect={handleFileSelect} supportedFormats={config?.supportedFormats} />
       </div>
+
+      <ExportControls
+        disabled={!file}
+        resizeWidth={resizeWidth}
+        resizeHeight={resizeHeight}
+        onWidthChange={handleWidthChange}
+        onHeightChange={handleHeightChange}
+        ratio={ratio}
+        onRatioChange={handleRatioChange}
+        quality={quality}
+        setQuality={setQuality}
+        trimStart={trimStart}
+        setTrimStart={setTrimStart}
+        trimEnd={trimEnd}
+        setTrimEnd={setTrimEnd}
+        outputFormat={outputFormat}
+        setOutputFormat={setOutputFormat}
+        config={config}
+        retentionHours={retentionHours}
+        setRetentionHours={setRetentionHours}
+        deleteOnDownload={deleteOnDownload}
+        setDeleteOnDownload={setDeleteOnDownload}
+        showAdvanced={showAdvanced}
+        setShowAdvanced={setShowAdvanced}
+        uploading={uploading}
+        uploadProgress={uploadProgress}
+        submitting={submitting}
+        error={error}
+        onRun={handleRun}
+        canRun={canRun}
+      />
 
       <JobList
         jobs={jobs}
@@ -314,8 +345,9 @@ export default function App() {
         onCancel={handleCancelJob}
         search={search}
         onSearchChange={setSearch}
-        operationFilter={operationFilter}
-        onOperationFilterChange={setOperationFilter}
+        formatFilter={formatFilter}
+        onFormatFilterChange={setFormatFilter}
+        supportedFormats={config?.supportedFormats}
       />
 
       <Toasts toasts={toasts} onDismiss={dismissToast} />

@@ -40,7 +40,6 @@ const worker = new Worker(
     try {
       const outputPath = await processVideo({
         inputPath,
-        operation: job.operation,
         outputFormat: job.outputFormat,
         options: job.options,
         onProgress: async (percent) => {

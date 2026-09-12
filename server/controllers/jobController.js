@@ -9,13 +9,14 @@ const { requestCancel } = require('../services/worker');
 const UPLOAD_DIR = path.join(__dirname, '..', process.env.UPLOAD_DIR || 'uploads');
 
 // POST /api/jobs
-// JSON body: { uploadId, originalFilename, operation, outputFormat, options, retentionHours, deleteOnDownload }
+// JSON body: { uploadId, originalFilename, outputFormat, options, retentionHours, deleteOnDownload }
 // uploadId comes from a prior upload call — the file is already on disk, so
 // this never re-transfers the video bytes. Actual processing happens in the
-// BullMQ worker (services/worker.js), not in this request.
+// BullMQ worker (services/worker.js), not in this request. `options` can
+// combine resize/quality/trim in any mix — see models/Job.js.
 async function createJob(req, res) {
   try {
-    const { uploadId, originalFilename, operation, outputFormat, options = {}, retentionHours, deleteOnDownload } =
+    const { uploadId, originalFilename, outputFormat, options = {}, retentionHours, deleteOnDownload } =
       req.body || {};
 
     if (!uploadId || typeof uploadId !== 'string') {
@@ -32,7 +33,7 @@ async function createJob(req, res) {
       });
     }
 
-    const validationErrors = validateJobInput({ operation, outputFormat, options });
+    const validationErrors = validateJobInput({ outputFormat, options });
     if (retentionHours !== undefined && (!Number.isFinite(retentionHours) || retentionHours <= 0)) {
       validationErrors.push('retentionHours must be a positive number');
     }
@@ -47,7 +48,6 @@ async function createJob(req, res) {
       storedFilename: path.basename(uploadId),
       inputFormat,
       outputFormat,
-      operation,
       options,
       status: 'pending',
       inputPath,
@@ -73,15 +73,15 @@ async function getJobStatus(req, res) {
   return res.json(serializeJob(job));
 }
 
-// GET /api/jobs?limit=20&cursor=<jobId>&search=<text>&operation=<op>
+// GET /api/jobs?limit=20&cursor=<jobId>&search=<text>&format=<ext>
 // Cursor pagination on _id (Mongo ObjectIds sort chronologically, so this
 // doubles as a createdAt-descending cursor without a separate index).
 async function listJobs(req, res) {
   const limit = Math.min(Number(req.query.limit) || 20, 100);
-  const { cursor, search, operation } = req.query;
+  const { cursor, search, format } = req.query;
 
   const filter = {};
-  if (operation) filter.operation = operation;
+  if (format) filter.outputFormat = format;
   if (search) filter.originalFilename = { $regex: search.trim(), $options: 'i' };
   if (cursor) filter._id = { $lt: cursor };
 
