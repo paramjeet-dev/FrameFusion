@@ -1,7 +1,7 @@
 const multer = require('multer');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const { SUPPORTED_FORMATS } = require('../models/Job');
+const { VIDEO_FORMATS } = require('../models/Job');
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || 'uploads';
 const MAX_FILE_SIZE_MB = Number(process.env.MAX_FILE_SIZE_MB || 500);
@@ -18,10 +18,10 @@ const storage = multer.diskStorage({
 
 function fileFilter(req, file, cb) {
   const ext = path.extname(file.originalname).slice(1).toLowerCase();
-  if (!SUPPORTED_FORMATS.includes(ext)) {
+  if (!VIDEO_FORMATS.includes(ext)) {
     return cb(
       new Error(
-        `Unsupported format ".${ext}". Supported formats: ${SUPPORTED_FORMATS.join(', ')}`
+        `Unsupported format ".${ext}". Uploads must be a video file: ${VIDEO_FORMATS.join(', ')}`
       )
     );
   }

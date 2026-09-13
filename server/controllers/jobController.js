@@ -4,7 +4,7 @@ const Job = require('../models/Job');
 const { validateJobInput } = require('../utils/validateJobInput');
 const { serializeJob } = require('../utils/serializeJob');
 const { videoQueue } = require('../services/queue');
-const { requestCancel } = require('../services/worker');
+const { requestCancel } = require('../services/cancelChannel');
 
 const UPLOAD_DIR = path.join(__dirname, '..', process.env.UPLOAD_DIR || 'uploads');
 
@@ -131,7 +131,11 @@ async function cancelJob(req, res) {
     return res.status(400).json({ error: `Cannot cancel a job that is already ${job.status}` });
   }
 
-  const state = requestCancel(String(job._id));
+  // requestCancel just publishes a message now (the worker may be a
+  // separate process), so we can't get a synchronous active/queued answer
+  // back from it — but the job's own status already tells us the same thing.
+  requestCancel(String(job._id));
+  const state = job.status === 'processing' ? 'active' : 'queued';
   return res.json({ jobId: job._id, cancelRequested: true, state });
 }
 

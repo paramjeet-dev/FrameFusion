@@ -4,6 +4,7 @@ import VideoPreview from './components/VideoPreview';
 import ExportControls, { RATIOS } from './components/ExportControls';
 import JobList from './components/JobList';
 import Toasts from './components/Toasts';
+import ThemeToggle from './components/ThemeToggle';
 import { cancelJob, chunkedUpload, createJob, deleteJob, getConfig, listJobs } from './api';
 import { socket } from './socket';
 
@@ -23,6 +24,16 @@ function hmsToSeconds({ h, m, s }) {
 
 export default function App() {
   const [config, setConfig] = useState(null);
+  const [theme, setTheme] = useState(() => {
+    const saved = localStorage.getItem('framefusion-theme');
+    if (saved) return saved;
+    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('framefusion-theme', theme);
+  }, [theme]);
 
   const [file, setFile] = useState(null);
   const [metadata, setMetadata] = useState(null);
@@ -36,6 +47,7 @@ export default function App() {
   const [trimStart, setTrimStart] = useState({ h: 0, m: 0, s: 0 });
   const [trimEnd, setTrimEnd] = useState({ h: 0, m: 0, s: 0 });
   const [outputFormat, setOutputFormat] = useState('mp4');
+  const [audioOnly, setAudioOnly] = useState(false);
   const [retentionHours, setRetentionHours] = useState(null);
   const [deleteOnDownload, setDeleteOnDownload] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -56,7 +68,7 @@ export default function App() {
     getConfig()
       .then((c) => {
         setConfig(c);
-        setOutputFormat((prev) => (c.supportedFormats.includes(prev) ? prev : c.supportedFormats[0]));
+        setOutputFormat((prev) => (c.videoFormats.includes(prev) ? prev : c.videoFormats[0]));
       })
       .catch(() => setConfig(null));
   }, []);
@@ -144,8 +156,18 @@ export default function App() {
     setResizeHeight(meta.height || 0);
     setRatio('variable');
     setQuality(100);
+    setAudioOnly(false);
     setTrimStart({ h: 0, m: 0, s: 0 });
     setTrimEnd(secondsToHMS(meta.durationSeconds));
+  }
+
+  function handleAudioOnlyChange(next) {
+    setAudioOnly(next);
+    // Switch the format dropdown to a sensible default in the new list
+    // rather than leaving it pointed at a format that's no longer valid.
+    if (config) {
+      setOutputFormat(next ? config.audioFormats[0] : config.videoFormats[0]);
+    }
   }
 
   async function handleFileSelect(picked) {
@@ -157,8 +179,8 @@ export default function App() {
 
     if (config) {
       const ext = picked.name.split('.').pop()?.toLowerCase();
-      if (!config.supportedFormats.includes(ext)) {
-        setError(`Unsupported format ".${ext}". Supported: ${config.supportedFormats.join(', ')}`);
+      if (!config.videoFormats.includes(ext)) {
+        setError(`Unsupported format ".${ext}". Supported: ${config.videoFormats.join(', ')}`);
         setFile(null);
         return;
       }
@@ -212,7 +234,7 @@ export default function App() {
   }
 
   function validateClientSide() {
-    if (!resizeWidth || !resizeHeight) return 'Resolution must be greater than zero.';
+    if (!audioOnly && (!resizeWidth || !resizeHeight)) return 'Resolution must be greater than zero.';
     if (quality < 0 || quality > 100) return 'Quality must be between 0 and 100.';
 
     const startSeconds = hmsToSeconds(trimStart);
@@ -235,7 +257,8 @@ export default function App() {
       return;
     }
 
-    const resizeChanged = resizeWidth !== metadata.width || resizeHeight !== metadata.height;
+    const resizeChanged =
+      !audioOnly && (resizeWidth !== metadata.width || resizeHeight !== metadata.height);
     const startSeconds = hmsToSeconds(trimStart);
     const endSeconds = hmsToSeconds(trimEnd);
     const trimChanged =
@@ -247,6 +270,7 @@ export default function App() {
         : null,
       quality,
       trim: trimChanged ? { startTime: startSeconds, duration: endSeconds - startSeconds } : null,
+      audioOnly,
     };
 
     setSubmitting(true);
@@ -266,9 +290,15 @@ export default function App() {
           status,
           progress: 0,
           filename: file.name,
-          transforms: [options.resize && 'resize', options.quality < 100 && `quality ${options.quality}`, options.trim && 'trim']
-            .filter(Boolean)
-            .join(' · ') || 'convert',
+          transforms:
+            [
+              options.audioOnly && 'audio only',
+              options.resize && 'resize',
+              options.quality < 100 && `quality ${options.quality}`,
+              options.trim && 'trim',
+            ]
+              .filter(Boolean)
+              .join(' · ') || 'convert',
           outputFormat,
           createdAt: new Date().toISOString(),
         },
@@ -298,11 +328,12 @@ export default function App() {
           Frame<span>Fusion</span>
         </h1>
         <div className="tagline">resize · quality · trim · convert — one export</div>
+        <ThemeToggle theme={theme} onToggle={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))} />
       </div>
 
       <div className="top-grid">
         <VideoPreview file={file} metadata={metadata} />
-        <Dropzone file={file} onSelect={handleFileSelect} supportedFormats={config?.supportedFormats} />
+        <Dropzone file={file} onSelect={handleFileSelect} videoFormats={config?.videoFormats} />
       </div>
 
       <ExportControls
@@ -321,6 +352,8 @@ export default function App() {
         setTrimEnd={setTrimEnd}
         outputFormat={outputFormat}
         setOutputFormat={setOutputFormat}
+        audioOnly={audioOnly}
+        onAudioOnlyChange={handleAudioOnlyChange}
         config={config}
         retentionHours={retentionHours}
         setRetentionHours={setRetentionHours}
@@ -347,7 +380,7 @@ export default function App() {
         onSearchChange={setSearch}
         formatFilter={formatFilter}
         onFormatFilterChange={setFormatFilter}
-        supportedFormats={config?.supportedFormats}
+        supportedFormats={config ? [...config.videoFormats, ...config.audioFormats] : undefined}
       />
 
       <Toasts toasts={toasts} onDismiss={dismissToast} />

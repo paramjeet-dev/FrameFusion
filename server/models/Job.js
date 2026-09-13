@@ -1,13 +1,15 @@
 const mongoose = require('mongoose');
 
-const SUPPORTED_FORMATS = ['mp4', 'mov', 'avi', 'flv', 'm4v', 'webm'];
+const VIDEO_FORMATS = ['mp4', 'mov', 'avi', 'flv', 'm4v', 'webm'];
+const AUDIO_FORMATS = ['mp3', 'aac', 'wav', 'flac'];
+const SUPPORTED_FORMATS = [...VIDEO_FORMATS, ...AUDIO_FORMATS];
 const STATUSES = ['pending', 'processing', 'done', 'failed', 'cancelled'];
 
 const jobSchema = new mongoose.Schema(
   {
     originalFilename: { type: String, required: true },
     storedFilename: { type: String, required: true },
-    inputFormat: { type: String, enum: SUPPORTED_FORMATS, required: true },
+    inputFormat: { type: String, enum: VIDEO_FORMATS, required: true },
     outputFormat: { type: String, enum: SUPPORTED_FORMATS, required: true },
 
     // A job is a single unified export, not one operation picked from a
@@ -15,8 +17,10 @@ const jobSchema = new mongoose.Schema(
     // Shape:
     //   {
     //     resize: { width, height, preserveAspectRatio } | null,
-    //     quality: 0-100 (maps to CRF; 100 = best quality/least compression),
+    //     quality: 0-100 (maps to CRF for video, or bitrate for audio-only),
     //     trim: { startTime, duration } | null,
+    //     audioOnly: boolean — strips video, outputFormat must then be one
+    //       of AUDIO_FORMATS and `resize` is ignored (meaningless for audio).
     //   }
     // `resize`/`trim` are null when that transform isn't requested at all
     // (i.e. keep original resolution / keep full length).
@@ -44,4 +48,7 @@ const jobSchema = new mongoose.Schema(
 );
 
 module.exports = mongoose.model('Job', jobSchema);
+module.exports.VIDEO_FORMATS = VIDEO_FORMATS;
+module.exports.AUDIO_FORMATS = AUDIO_FORMATS;
 module.exports.SUPPORTED_FORMATS = SUPPORTED_FORMATS;
+

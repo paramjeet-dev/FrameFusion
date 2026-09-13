@@ -2,10 +2,10 @@ import { useRef, useState } from 'react';
 
 const FALLBACK_FORMATS = ['mp4', 'mov', 'avi', 'flv', 'm4v', 'webm'];
 
-export default function Dropzone({ file, onSelect, supportedFormats }) {
+export default function Dropzone({ file, onSelect, videoFormats }) {
   const inputRef = useRef(null);
   const [dragging, setDragging] = useState(false);
-  const formats = supportedFormats || FALLBACK_FORMATS;
+  const formats = videoFormats || FALLBACK_FORMATS;
 
   function handleFiles(fileList) {
     const picked = fileList?.[0];

@@ -3,7 +3,7 @@ const fsSync = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { getMetadata } = require('../services/ffmpegService');
-const { SUPPORTED_FORMATS } = require('../models/Job');
+const { VIDEO_FORMATS } = require('../models/Job');
 
 const UPLOAD_DIR = path.join(__dirname, '..', process.env.UPLOAD_DIR || 'uploads');
 const CHUNKS_DIR = path.join(UPLOAD_DIR, 'chunks');
@@ -50,9 +50,9 @@ async function initUpload(req, res) {
   }
 
   const ext = filename.split('.').pop()?.toLowerCase();
-  if (!SUPPORTED_FORMATS.includes(ext)) {
+  if (!VIDEO_FORMATS.includes(ext)) {
     return res.status(400).json({
-      error: `Unsupported format ".${ext}". Supported formats: ${SUPPORTED_FORMATS.join(', ')}`,
+      error: `Unsupported format ".${ext}". Uploads must be a video file: ${VIDEO_FORMATS.join(', ')}`,
     });
   }
 

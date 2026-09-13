@@ -1,21 +1,28 @@
-const { SUPPORTED_FORMATS } = require('../models/Job');
+const { VIDEO_FORMATS, AUDIO_FORMATS } = require('../models/Job');
 
 /**
  * Returns an array of human-readable error messages (empty if valid).
  * `options.resize` and `options.trim` are optional — a job with neither is
  * just a quality/format pass. `options.quality` always applies (defaults to
- * 100 if omitted).
+ * 100 if omitted). `options.audioOnly` switches the valid outputFormat set
+ * from video to audio formats and makes `resize` meaningless.
  */
 function validateJobInput({ outputFormat, options = {} }) {
   const errors = [];
+  const { resize, quality, trim, audioOnly } = options;
 
-  if (!SUPPORTED_FORMATS.includes(outputFormat)) {
-    errors.push(`outputFormat must be one of: ${SUPPORTED_FORMATS.join(', ')}`);
+  const validFormats = audioOnly ? AUDIO_FORMATS : VIDEO_FORMATS;
+  if (!validFormats.includes(outputFormat)) {
+    errors.push(
+      audioOnly
+        ? `outputFormat must be one of: ${AUDIO_FORMATS.join(', ')} when audioOnly is set`
+        : `outputFormat must be one of: ${VIDEO_FORMATS.join(', ')}`
+    );
   }
 
-  const { resize, quality, trim } = options;
-
-  if (resize) {
+  if (resize && audioOnly) {
+    errors.push('resize cannot be combined with audioOnly (there is no video stream to resize)');
+  } else if (resize) {
     const { width, height } = resize;
     if (!width && !height) {
       errors.push('resize requires at least one of width or height');

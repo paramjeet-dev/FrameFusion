@@ -12,29 +12,28 @@ Video utility tool to resize, compress, trim, and convert videos in mp4, mov, av
 ## Architecture
 - **A job is a single unified export, not one operation picked from a list.** Resize, quality,
   and trim are each independently optional and combine into one ffmpeg command — you can resize
-  *and* trim *and* set quality in the same pass, or none of them (a plain format convert). This
-  replaced an earlier "pick resize OR compress OR trim OR convert" model; the reference UI
-  exposes all three simultaneously, which is also just a better way to build this — see
+  *and* trim *and* set quality in the same pass, or none of them (a plain format convert). See
   `server/models/Job.js` and `server/services/ffmpegService.js`.
-- **Upload → job → process** is three separate steps. A file is uploaded (chunked, see below)
-  and probed for metadata first; job creation then references that file by `uploadId` and never
-  re-sends the bytes; the actual FFmpeg work happens in a BullMQ **worker**, which currently
-  runs in the same Node process as the API (`server/services/worker.js` is required by
-  `server.js`) — pulling it into a separate process later is a config change, not a rewrite.
-- **Status updates are pushed, not polled.** The worker emits progress/status changes onto an
-  in-process event bus (`server/services/jobEvents.js`); `server.js` re-broadcasts those over
-  Socket.IO to every connected client. This only works because the worker and the socket server
-  share a process — if the worker ever moves to its own process, this event bus needs to become
-  Redis pub/sub instead (Redis is already a dependency via BullMQ, so that's a small change).
-- **Cancellation** kills the in-flight `ffmpeg` child process directly. The worker keeps a
-  `Map<jobId, command>` of whatever's currently running; `POST /api/jobs/:id/cancel` looks the
-  job up and calls `.kill('SIGKILL')` on its command if it's active, or flags it so the worker
-  skips it entirely if it's still queued.
+- **API and worker are separate processes.** `server.js` runs the Express API and the Socket.IO
+  layer; `worker.js` runs the BullMQ worker that actually does the FFmpeg work. Both connect to
+  the same MongoDB and Redis. They used to share a process (worker required directly by
+  `server.js`); splitting them meant two things that used to be direct in-memory calls had to
+  become Redis messages instead:
+  - **Job status updates:** the worker publishes to a `framefusion:job-updates` Redis channel
+    (`server/services/jobEvents.js`); the API subscribes and re-broadcasts over Socket.IO. This
+    used to be a plain Node `EventEmitter`, which only worked because both lived in one process.
+  - **Cancellation:** the API publishes to a `framefusion:cancel-requests` channel
+    (`server/services/cancelChannel.js`); the worker subscribes and kills the matching ffmpeg
+    process from its own `Map<jobId, command>`. The API can no longer reach that Map directly,
+    so `POST /api/jobs/:id/cancel` can't return a live active/queued check the way it used to —
+    it now infers that from the job's own `status` field in Mongo instead, which is equivalent.
+  - Both processes assume **shared local disk** for `uploads/`/`processed/` — fine on one
+    machine, but would need shared storage (S3 or similar) if the worker ever runs on a
+    different host than the API.
 - **Codec selection is format-aware.** `webm` output uses `libvpx-vp9` + `libopus` with explicit
-  speed flags (`-deadline good -cpu-used 4 -row-mt 1`); everything else uses `libx264` + `aac`.
-  The old version always forced `libx264` regardless of container, which is invalid for webm and
-  would have hit VP9's notoriously slow default settings if it had ever gotten that far — fixed
-  while rebuilding this rather than left as a latent bug.
+  speed flags (`-deadline good -cpu-used 4 -row-mt 1`); other video formats use `libx264` + `aac`;
+  audio-only exports use `libmp3lame`/`aac`/`pcm_s16le`/`flac` depending on the target format,
+  with `-vn` to drop the video stream entirely.
 - **No auth** — open/anonymous usage, unchanged from v1.
 
 ## File Lifecycle
@@ -46,15 +45,22 @@ Video utility tool to resize, compress, trim, and convert videos in mp4, mov, av
 - **Abandoned chunked uploads** (browser closed mid-upload) are swept after 6 hours regardless of the global retention setting.
 
 ## Backend Setup
+Two processes now, in two terminals:
 ```bash
 cd server
 npm install
 cp .env.example .env   # adjust MONGO_URI / REDIS_URL if needed
-npm run dev             # requires nodemon (npm install -g nodemon), or `npm start`
+
+# terminal 1 — API + WebSocket
+npm run dev
+
+# terminal 2 — video processing worker
+npm run dev:worker
 ```
+(`npm start` / `npm run worker` for production, without the nodemon file-watching.)
 
 Requires **both MongoDB and Redis** running locally (or pointed at remote instances via
-`MONGO_URI` / `REDIS_URL`).
+`MONGO_URI` / `REDIS_URL`) — both processes connect to both.
 
 ```bash
 # quick local Redis if you don't have one:
@@ -65,15 +71,17 @@ docker run -p 6379:6379 redis
 including `server/uploads/` and `server/processed/` — which the app itself writes to constantly
 (every chunk of a chunked upload, every processed output file). Without the ignore rules in
 `nodemon.json`, nodemon restarts mid-upload/mid-job, which surfaces to the client as "Failed to
-fetch" or "Unexpected end of JSON input" (the connection gets cut mid-response). If you ever see
-either of those with no real error in the logs, check for `[nodemon] restarting due to changes`
-in the terminal — it's easy to miss since it isn't printed as an error.
+fetch" or "Unexpected end of JSON input" (the connection gets cut mid-response). This applies to
+`dev:worker` too, since it's the worker process writing those files — the same `nodemon.json` in
+`server/` covers both scripts automatically.
 
 ## API
 
 ### `GET /api/config`
-Returns `{ maxFileSizeMB, supportedFormats, defaultRetentionHours }`. The frontend reads this
-once on load so client-side validation and dropdowns stay in sync with the server.
+Returns `{ maxFileSizeMB, videoFormats, audioFormats, defaultRetentionHours }`. The frontend
+reads this once on load so client-side validation and dropdowns stay in sync with the server.
+`videoFormats` is also what uploads are validated against — the source file is always a video,
+even for an audio-only export.
 
 ### Uploads
 Two ways to get a file onto the server; both end with the same response shape:
@@ -95,11 +103,12 @@ All upload endpoints are rate limited together: 300 requests / 15 min per IP.
 ### `POST /api/jobs`
 JSON body: `{ "uploadId", "originalFilename", "outputFormat", "options", "retentionHours", "deleteOnDownload" }`
 - `uploadId` — from a prior upload call
-- `outputFormat` — one of `mp4`, `mov`, `avi`, `flv`, `m4v`, `webm`
+- `outputFormat` — one of `mp4`, `mov`, `avi`, `flv`, `m4v`, `webm` (video), or `mp3`, `aac`, `wav`, `flac` (audio-only, requires `options.audioOnly: true`)
 - `options` — any combination, all optional except quality (which always applies):
-  - `resize`: `{ "width": 1280, "height": 720, "preserveAspectRatio": true }` or `null`/omitted to keep the source resolution
-  - `quality`: `0-100`, default `100` — maps to a codec-appropriate CRF (see `qualityToCrf()` in `ffmpegService.js`)
-  - `trim`: `{ "startTime": 5, "duration": 10 }` (seconds) or `null`/omitted to keep the full length
+  - `resize`: `{ "width": 1280, "height": 720, "preserveAspectRatio": true }` or `null`/omitted to keep the source resolution — rejected if `audioOnly` is set (no video stream to resize)
+  - `quality`: `0-100`, default `100` — maps to a codec-appropriate CRF for video (see `qualityToCrf()`), or a bitrate from 64-320kbps for audio-only (see `qualityToAudioBitrateKbps()`), both in `ffmpegService.js`
+  - `trim`: `{ "startTime": 5, "duration": 10 }` (seconds) or `null`/omitted to keep the full length — works the same whether or not `audioOnly` is set
+  - `audioOnly`: boolean, default `false` — strips the video stream entirely (`-vn`); `outputFormat` must then be an audio format
 - `retentionHours` — optional; overrides `CLEANUP_MAX_AGE_HOURS` for this job's processed file
 - `deleteOnDownload` — optional, default `true`
 
@@ -109,7 +118,7 @@ Response: `{ "jobId", "status" }`. Enqueues onto BullMQ and returns immediately.
 ### `GET /api/jobs/:id`
 Response: `{ "jobId", "status", "progress", "errorMessage", "filename", "transforms", "outputFormat", "createdAt", "expired", "retentionHours", "deleteOnDownload", "downloadUrl" }`
 
-`transforms` is a short human-readable summary of what the job actually did (e.g. `"resize · quality 60 · trim"`, or `"convert"` if none of the optional transforms were used) — there's no single `operation` field anymore since a job can combine any mix.
+`transforms` is a short human-readable summary of what the job actually did (e.g. `"resize · quality 60 · trim"`, `"audio only · trim"`, or `"convert"` if none of the optional transforms were used) — there's no single `operation` field anymore since a job can combine any mix.
 
 `status` is one of `pending`, `processing`, `done`, `failed`, `cancelled`.
 
@@ -154,6 +163,13 @@ of picking one operation from a list. Layout:
   "Advanced options" disclosure so the main panel stays uncluttered.
 - **Ratio presets** (16:9, 9:16, 1:1, 4:3, 3:4, or Variable) recompute height from width live;
   "Variable" keeps the source aspect ratio locked while letting either field drive the other.
+- **Audio only** toggle strips Resolution/Ratio out of the flow (they're disabled, not hidden —
+  keeps the layout stable rather than reflowing) and switches the Format dropdown to audio
+  formats; the Quality slider relabels to "Audio quality" and now drives bitrate instead of CRF.
+- **Dark mode** toggle in the header, persisted to `localStorage`, defaulting to the OS-level
+  `prefers-color-scheme` on first visit. Every color in `styles.css` is a CSS custom property, so
+  the dark variant is a single `[data-theme='dark']` override block — no component needed a
+  dark-specific class of its own.
 
 One deliberate deviation from the reference: it mocks up OS-style window chrome (traffic-light
 buttons, minimize/maximize). This is a web app, not a desktop shell, so that's skipped rather
@@ -170,7 +186,8 @@ every job hang at `processing` / 0% forever. Fixed by adding `.run()` in `runCom
 
 ## Next Steps
 - [ ] True resumable uploads (resume after a page reload, not just mid-session retry)
-- [ ] Move the worker to its own process/deployment once load justifies it (event bus becomes Redis pub/sub instead of a local EventEmitter)
 - [ ] Per-job concurrency limits / priority in the BullMQ queue
 - [ ] Reconnection handling: a reconciliation fetch on socket reconnect, in case updates were missed while disconnected
 - [ ] Live preview of trim range against the actual video (currently just numeric h:m:s inputs)
+- [ ] Audio waveform in the preview card when "Audio only" is on (currently still shows the video frame thumbnail)
+- [ ] Shared storage (S3 or similar) for `uploads/`/`processed/` if the worker and API ever run on different machines — currently assumes shared local disk

@@ -12,6 +12,8 @@
   --success-soft: #e5f7f0;
   --error: #e5484d;
   --error-soft: #fceceb;
+  --preview-bg: #eef0f5;
+  --input-disabled-bg: #eceef3;
 
   /* Type */
   --font-sans: 'Inter', system-ui, sans-serif;
@@ -19,6 +21,30 @@
 
   --radius: 12px;
   --shadow-card: 0 1px 2px rgba(20, 20, 50, 0.04), 0 8px 24px rgba(20, 20, 50, 0.05);
+}
+
+/* Dark mode overrides the same variable names, so every component below
+   adapts automatically without any dark-specific selectors of its own. */
+:root[data-theme='dark'] {
+  --bg: #14161c;
+  --card: #1c1f28;
+  --border: #2b2f3b;
+  --text: #eef0f5;
+  --text-muted: #8b8fa3;
+  --accent: #8479f5;
+  --accent-hover: #6c60e8;
+  --accent-soft: rgba(132, 121, 245, 0.16);
+  --success: #34d399;
+  --success-soft: rgba(52, 211, 153, 0.14);
+  --error: #f87171;
+  --error-soft: rgba(248, 113, 113, 0.14);
+  --preview-bg: #20232d;
+  --input-disabled-bg: #262a35;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.2), 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+
+html {
+  transition: background-color 0.15s ease;
 }
 
 * {
@@ -92,6 +118,26 @@ select:focus-visible,
   margin-left: 4px;
 }
 
+.theme-toggle {
+  margin-left: auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.theme-toggle:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 /* Top grid: preview + dropzone */
 .top-grid {
   display: grid;
@@ -121,7 +167,7 @@ select:focus-visible,
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #eef0f5;
+  background: var(--preview-bg);
 }
 
 .preview-empty {
@@ -341,7 +387,7 @@ select:focus-visible,
 
 .dimension-row input:disabled {
   color: var(--text-muted);
-  background: #eceef3;
+  background: var(--input-disabled-bg);
 }
 
 .dimension-x {

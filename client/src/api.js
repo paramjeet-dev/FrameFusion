@@ -60,7 +60,7 @@ export async function deleteJob(jobId) {
 export async function getConfig() {
   const res = await fetch('/api/config');
   if (!res.ok) throw new Error('Failed to load server config');
-  return res.json(); // { maxFileSizeMB, supportedFormats, defaultRetentionHours }
+  return res.json(); // { maxFileSizeMB, videoFormats, audioFormats, defaultRetentionHours }
 }
 
 export async function stageUpload(file) {

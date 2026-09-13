@@ -12,11 +12,12 @@ const fs = require('fs');
 const jobRoutes = require('./routes/jobRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
 const { runCleanup } = require('./services/cleanupService');
-const { SUPPORTED_FORMATS } = require('./models/Job');
+const { VIDEO_FORMATS, AUDIO_FORMATS } = require('./models/Job');
 const jobEvents = require('./services/jobEvents');
-// Requiring the worker starts it — video jobs are processed in this same
-// process, pulled from the BullMQ queue backed by Redis.
-require('./services/worker');
+// The worker is no longer required here — it runs as its own process now
+// (see worker.js at the project root). This process only talks to it via
+// Redis: BullMQ for enqueueing jobs, and jobEvents/cancelChannel pub/sub for
+// status updates and cancellation.
 
 const app = express();
 const httpServer = http.createServer(app);
@@ -34,7 +35,7 @@ const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/framefusio
 // Re-broadcast worker job events to all connected clients. Simple global
 // broadcast rather than per-job rooms — job volume here doesn't warrant the
 // extra bookkeeping, and clients just ignore updates for jobs they don't have.
-jobEvents.on('update', (payload) => io.emit('job:update', payload));
+jobEvents.subscribe((payload) => io.emit('job:update', payload));
 
 io.on('connection', (socket) => {
   console.log(`[socket] client connected: ${socket.id}`);
@@ -54,7 +55,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/api/config', (req, res) => {
   res.json({
     maxFileSizeMB: Number(process.env.MAX_FILE_SIZE_MB || 500),
-    supportedFormats: SUPPORTED_FORMATS,
+    videoFormats: VIDEO_FORMATS,
+    audioFormats: AUDIO_FORMATS,
     defaultRetentionHours: Number(process.env.CLEANUP_MAX_AGE_HOURS || 24),
   });
 });

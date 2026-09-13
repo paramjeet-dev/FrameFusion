@@ -1,4 +1,5 @@
-const FALLBACK_FORMATS = ['mp4', 'mov', 'avi', 'flv', 'm4v', 'webm'];
+const FALLBACK_VIDEO_FORMATS = ['mp4', 'mov', 'avi', 'flv', 'm4v', 'webm'];
+const FALLBACK_AUDIO_FORMATS = ['mp3', 'aac', 'wav', 'flac'];
 export const RATIOS = { '16:9': 16 / 9, '9:16': 9 / 16, '1:1': 1, '4:3': 4 / 3, '3:4': 3 / 4 };
 
 function InfoIcon() {
@@ -34,6 +35,8 @@ export default function ExportControls({
   setTrimEnd,
   outputFormat,
   setOutputFormat,
+  audioOnly,
+  onAudioOnlyChange,
   config,
   retentionHours,
   setRetentionHours,
@@ -48,8 +51,11 @@ export default function ExportControls({
   onRun,
   canRun,
 }) {
-  const outputFormats = config?.supportedFormats || FALLBACK_FORMATS;
+  const outputFormats = audioOnly
+    ? config?.audioFormats || FALLBACK_AUDIO_FORMATS
+    : config?.videoFormats || FALLBACK_VIDEO_FORMATS;
   const defaultRetention = config?.defaultRetentionHours || 24;
+  const resolutionDisabled = disabled || audioOnly;
 
   return (
     <div className="controls-grid">
@@ -60,9 +66,13 @@ export default function ExportControls({
           <div className="field-icon-content">
             <div className="field-icon-label">Resolution</div>
             <div className="dimension-row">
-              <NumberBox value={resizeWidth} onChange={onWidthChange} disabled={disabled} />
+              <NumberBox value={resizeWidth} onChange={onWidthChange} disabled={resolutionDisabled} />
               <span className="dimension-x">x</span>
-              <NumberBox value={resizeHeight} onChange={onHeightChange} disabled={disabled || ratio !== 'variable'} />
+              <NumberBox
+                value={resizeHeight}
+                onChange={onHeightChange}
+                disabled={resolutionDisabled || ratio !== 'variable'}
+              />
             </div>
           </div>
         </div>
@@ -70,7 +80,7 @@ export default function ExportControls({
         <div className="field-row-icon">
           <InfoIcon />
           <div className="field-icon-content">
-            <div className="field-icon-label">Quality</div>
+            <div className="field-icon-label">{audioOnly ? 'Audio quality' : 'Quality'}</div>
             <div className="quality-row">
               <input
                 className="quality-slider"
@@ -133,7 +143,7 @@ export default function ExportControls({
           </div>
           <div className="select-field">
             <label htmlFor="ratio">Ratio</label>
-            <select id="ratio" value={ratio} onChange={(e) => onRatioChange(e.target.value)}>
+            <select id="ratio" value={ratio} onChange={(e) => onRatioChange(e.target.value)} disabled={audioOnly}>
               <option value="variable">Variable</option>
               {Object.keys(RATIOS).map((key) => (
                 <option key={key} value={key}>
@@ -143,6 +153,11 @@ export default function ExportControls({
             </select>
           </div>
         </div>
+
+        <label className="checkbox-row">
+          <input type="checkbox" checked={audioOnly} onChange={(e) => onAudioOnlyChange(e.target.checked)} />
+          Audio only (strip video, export audio track)
+        </label>
 
         <button
           className="advanced-toggle"

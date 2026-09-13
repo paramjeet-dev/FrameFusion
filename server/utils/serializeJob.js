@@ -2,6 +2,7 @@
 // a single named "operation" — e.g. "resize · quality 60 · trim".
 function summarizeTransforms(options = {}) {
   const parts = [];
+  if (options.audioOnly) parts.push('audio only');
   if (options.resize) parts.push('resize');
   if (options.quality !== undefined && options.quality < 100) parts.push(`quality ${options.quality}`);
   if (options.trim) parts.push('trim');

@@ -5,16 +5,25 @@ const { processVideo } = require('./ffmpegService');
 const Job = require('../models/Job');
 const { serializeJob } = require('../utils/serializeJob');
 const jobEvents = require('./jobEvents');
+const { onCancelRequested } = require('./cancelChannel');
 
 // Tracks the live ffmpeg command per job so a cancel request can kill it.
+// This only needs to live in this process now — the API process reaches it
+// via the cancelChannel message, not a direct function call.
 const activeCommands = new Map();
 // jobIds cancelled before or during processing — checked at pickup time and
 // used to distinguish "cancelled" from "failed" in the catch block below.
 const cancelRequested = new Set();
 
+onCancelRequested((jobId) => {
+  cancelRequested.add(jobId);
+  const command = activeCommands.get(jobId);
+  if (command) command.kill('SIGKILL');
+});
+
 async function emitFullUpdate(jobId) {
   const job = await Job.findById(jobId);
-  if (job) jobEvents.emit('update', serializeJob(job));
+  if (job) jobEvents.publish(serializeJob(job));
 }
 
 const worker = new Worker(
@@ -44,7 +53,7 @@ const worker = new Worker(
         options: job.options,
         onProgress: async (percent) => {
           await Job.findByIdAndUpdate(jobId, { progress: percent });
-          jobEvents.emit('update', { jobId, progress: percent, status: 'processing' });
+          jobEvents.publish({ jobId, progress: percent, status: 'processing' });
         },
         registerCommand: (command) => activeCommands.set(jobId, command),
       });
@@ -79,21 +88,4 @@ const worker = new Worker(
 
 worker.on('error', (err) => console.error('[worker] error:', err.message));
 
-/**
- * Requests cancellation of a job. If it's already running, kills the ffmpeg
- * process directly (its 'error' event then drives the catch block above).
- * If it's still queued, the worker checks cancelRequested at pickup time and
- * skips processing entirely.
- * Returns 'active' or 'queued' depending on which case applied.
- */
-function requestCancel(jobId) {
-  cancelRequested.add(jobId);
-  const command = activeCommands.get(jobId);
-  if (command) {
-    command.kill('SIGKILL');
-    return 'active';
-  }
-  return 'queued';
-}
-
-module.exports = { worker, requestCancel };
+module.exports = { worker };
