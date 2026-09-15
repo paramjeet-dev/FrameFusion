@@ -7,7 +7,9 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "worker": "node worker.js",
-    "dev:worker": "nodemon worker.js"
+    "dev:worker": "nodemon worker.js",
+    "test": "jest",
+    "test:watch": "jest --watch"
   },
   "dependencies": {
     "express": "^4.19.2",
@@ -23,9 +25,12 @@
     "uuid": "^9.0.1",
     "bullmq": "^5.12.0",
     "ioredis": "^5.4.1",
-    "socket.io": "^4.7.5"
+    "socket.io": "^4.7.5",
+    "pino": "^9.4.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.4"
+    "nodemon": "^3.1.4",
+    "jest": "^29.7.0",
+    "supertest": "^7.0.0"
   }
 }

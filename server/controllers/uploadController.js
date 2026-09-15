@@ -3,6 +3,7 @@ const fsSync = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { getMetadata } = require('../services/ffmpegService');
+const { verifyContainerMatchesExtension } = require('../utils/detectFileType');
 const { VIDEO_FORMATS } = require('../models/Job');
 
 const UPLOAD_DIR = path.join(__dirname, '..', process.env.UPLOAD_DIR || 'uploads');
@@ -18,6 +19,13 @@ const CHUNKS_DIR = path.join(UPLOAD_DIR, 'chunks');
 async function stageUpload(req, res) {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
+  }
+
+  const claimedExt = path.extname(req.file.originalname).slice(1).toLowerCase();
+  const containerCheck = await verifyContainerMatchesExtension(req.file.path, claimedExt);
+  if (!containerCheck.ok) {
+    await fs.unlink(req.file.path).catch(() => {});
+    return res.status(400).json({ error: containerCheck.reason });
   }
 
   try {
@@ -114,6 +122,12 @@ async function completeUpload(req, res) {
   }
 
   await fs.rm(sessionDir, { recursive: true, force: true }).catch(() => {});
+
+  const containerCheck = await verifyContainerMatchesExtension(finalPath, meta.ext);
+  if (!containerCheck.ok) {
+    await fs.unlink(finalPath).catch(() => {});
+    return res.status(400).json({ error: containerCheck.reason });
+  }
 
   try {
     const metadata = await getMetadata(finalPath);

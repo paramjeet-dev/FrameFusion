@@ -1,4 +1,5 @@
 const { createPublisher, createSubscriber } = require('./redisPubSub');
+const logger = require('./logger');
 
 const CHANNEL = 'framefusion:job-updates';
 
@@ -23,7 +24,7 @@ function publish(payload) {
 function subscribe(handler) {
   if (!subscribed) {
     subscriber.subscribe(CHANNEL).catch((err) => {
-      console.error('[jobEvents] failed to subscribe:', err.message);
+      logger.error({ err: err.message }, 'job_events_subscribe_failed');
     });
     subscribed = true;
   }
@@ -32,7 +33,7 @@ function subscribe(handler) {
     try {
       handler(JSON.parse(message));
     } catch (err) {
-      console.error('[jobEvents] failed to parse message:', err.message);
+      logger.error({ err: err.message }, 'job_events_parse_failed');
     }
   });
 }

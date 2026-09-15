@@ -29,6 +29,25 @@ function qualityToCrf(quality, codec) {
 }
 
 /**
+ * Maps the frontend's 0-100 "quality" slider to an audio bitrate (kbps)
+ * for audio-only exports. 100 -> 320kbps, 0 -> 64kbps.
+ */
+function qualityToAudioBitrateKbps(quality) {
+  const q = Math.min(100, Math.max(0, quality));
+  return Math.round(64 + (q / 100) * 256);
+}
+
+/**
+ * Maps quality to a GIF sample rate (fps). GIFs get huge fast, so this
+ * stays much lower than a normal video framerate regardless of quality —
+ * 100 -> 15fps (smooth-ish), 0 -> 5fps (choppy but tiny).
+ */
+function qualityToGifFps(quality) {
+  const q = Math.min(100, Math.max(0, quality));
+  return Math.round(5 + (q / 100) * 10);
+}
+
+/**
  * Runs an ffmpeg command and reports progress via the onProgress callback (0-100).
  */
 function runCommand(command, onProgress) {
@@ -45,25 +64,26 @@ function runCommand(command, onProgress) {
   });
 }
 
-/**
- * Maps the frontend's 0-100 "quality" slider to an audio bitrate (kbps)
- * for audio-only exports. 100 -> 320kbps (effectively transparent for most
- * codecs here), 0 -> 64kbps (noticeably compressed but still intelligible).
- */
-function qualityToAudioBitrateKbps(quality) {
-  const q = Math.min(100, Math.max(0, quality));
-  return Math.round(64 + (q / 100) * 256);
+function buildScaleFilter(resize) {
+  const { width, height, preserveAspectRatio = true } = resize;
+  if (!preserveAspectRatio && width && height) {
+    return `scale=${width}:${height}`; // exact, may distort
+  }
+  if (width && height) {
+    return `scale=${width}:${height}:force_original_aspect_ratio=decrease`; // fit within box
+  }
+  if (width) return `scale=${width}:-2`;
+  return `scale=-2:${height}`;
 }
 
 /**
  * A job is a single unified export — resize, quality, and trim are each
- * independently optional and combined into one ffmpeg command, rather than
- * picking exactly one transform to run.
+ * independently optional and combined into one ffmpeg command.
  *
  * options:
- *   resize: { width, height, preserveAspectRatio } | null/undefined — no resize if omitted (ignored when audioOnly)
- *   quality: 0-100 (default 100) — CRF for video, or bitrate for audio-only
- *   trim: { startTime, duration } | null/undefined — no trim if omitted
+ *   resize: { width, height, preserveAspectRatio } | null/undefined
+ *   quality: 0-100 (default 100) — CRF for video, bitrate for audio-only, or sample fps for gif
+ *   trim: { startTime, duration } | null/undefined
  *   audioOnly: boolean — strips video entirely; outputFormat must be an audio format
  */
 async function processVideo({ inputPath, outputFormat, options = {}, onProgress, registerCommand }) {
@@ -77,41 +97,32 @@ async function processVideo({ inputPath, outputFormat, options = {}, onProgress,
   }
 
   if (audioOnly) {
-    // No video stream at all — resize is meaningless here and is rejected
-    // earlier in validation, but double-check rather than silently ignore.
     const bitrate = qualityToAudioBitrateKbps(quality);
     command.noVideo();
 
     const audioCodecs = { mp3: 'libmp3lame', aac: 'aac', wav: 'pcm_s16le', flac: 'flac' };
     command.audioCodec(audioCodecs[outputFormat] || 'aac');
 
-    // Lossless formats (wav/flac) don't take a bitrate target — the quality
-    // slider only has an effect on the lossy formats (mp3/aac).
     if (outputFormat === 'mp3' || outputFormat === 'aac') {
       command.audioBitrate(bitrate);
     }
+  } else if (outputFormat === 'gif') {
+    // GIFs need a generated palette to look decent (ffmpeg's default GIF
+    // encoder without one looks noticeably banded) — the standard
+    // palettegen/paletteuse trick, built as one filter_complex graph since
+    // it needs to split the stream in two.
+    const fps = qualityToGifFps(quality);
+    const scale = resize ? buildScaleFilter(resize) : 'scale=480:-2:flags=lanczos'; // cap default size
+    const filter = `fps=${fps},${scale},split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer`;
+    command.noAudio().outputOptions(['-filter_complex', filter]);
   } else {
     if (resize) {
-      const { width, height, preserveAspectRatio = true } = resize;
-      // -2 (rather than -1) keeps the computed dimension even, which both
-      // libx264 and libvpx-vp9 require for standard chroma subsampling.
-      let scaleFilter;
-      if (!preserveAspectRatio && width && height) {
-        scaleFilter = `scale=${width}:${height}`; // exact, may distort
-      } else if (width && height) {
-        scaleFilter = `scale=${width}:${height}:force_original_aspect_ratio=decrease`; // fit within box
-      } else if (width) {
-        scaleFilter = `scale=${width}:-2`;
-      } else {
-        scaleFilter = `scale=-2:${height}`;
-      }
-      command.videoFilters(scaleFilter);
+      command.videoFilters(buildScaleFilter(resize));
     }
 
     // Codec choice depends on the output container — libx264 doesn't mux into
     // webm, and VP9's default encoder settings are notoriously slow without
-    // explicit speed flags (a likely cause if a "convert to webm" job ever
-    // felt stuck-slow rather than actually hung).
+    // explicit speed flags.
     if (outputFormat === 'webm') {
       const crf = qualityToCrf(quality, 'vp9');
       command
@@ -131,6 +142,50 @@ async function processVideo({ inputPath, outputFormat, options = {}, onProgress,
   // mid-flight for cancellation — runCommand() below is what calls .run().
   if (registerCommand) registerCommand(command);
 
+  await runCommand(command, onProgress);
+  return outPath;
+}
+
+/**
+ * Extracts a single still frame as a JPG. Defaults to the midpoint of the
+ * source if no timestamp is given — a reasonable "poster image" default.
+ */
+async function generateThumbnail({ inputPath, timestamp, registerCommand, onProgress }) {
+  let ts = timestamp;
+  if (ts === undefined || ts === null) {
+    const meta = await getMetadata(inputPath);
+    ts = (meta.durationSeconds || 2) / 2;
+  }
+
+  const outPath = outputPathFor('jpg');
+  const command = ffmpeg(inputPath)
+    .seekInput(ts)
+    .outputOptions(['-frames:v 1', '-q:v 2'])
+    .output(outPath);
+
+  if (registerCommand) registerCommand(command);
+  await runCommand(command, onProgress);
+  return outPath;
+}
+
+/**
+ * Samples `frameCount` frames evenly across the whole video and tiles them
+ * into a single grid image — the kind of strip used for scrubbing previews
+ * on a seek bar. Sampling rate is derived from frameCount/duration so the
+ * frames land evenly spaced regardless of the source's actual framerate.
+ */
+async function generateSpriteSheet({ inputPath, frameCount = 16, columns = 4, registerCommand, onProgress }) {
+  const meta = await getMetadata(inputPath);
+  const duration = meta.durationSeconds || 1;
+  const rows = Math.ceil(frameCount / columns);
+  const fps = frameCount / duration;
+  const cellWidth = 160;
+
+  const outPath = outputPathFor('jpg');
+  const filter = `fps=${fps.toFixed(4)},scale=${cellWidth}:-1,tile=${columns}x${rows}`;
+  const command = ffmpeg(inputPath).outputOptions(['-vf', filter, '-frames:v 1']).output(outPath);
+
+  if (registerCommand) registerCommand(command);
   await runCommand(command, onProgress);
   return outPath;
 }
@@ -156,4 +211,12 @@ function getMetadata(inputPath) {
   });
 }
 
-module.exports = { processVideo, getMetadata, qualityToCrf };
+module.exports = {
+  processVideo,
+  generateThumbnail,
+  generateSpriteSheet,
+  getMetadata,
+  qualityToCrf,
+  qualityToAudioBitrateKbps,
+  qualityToGifFps,
+};

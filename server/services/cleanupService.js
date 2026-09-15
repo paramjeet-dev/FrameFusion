@@ -1,6 +1,7 @@
 const fs = require('fs/promises');
 const path = require('path');
 const Job = require('../models/Job');
+const logger = require('./logger');
 
 const UPLOAD_DIR = path.join(__dirname, '..', process.env.UPLOAD_DIR || 'uploads');
 const CHUNKS_DIR = path.join(UPLOAD_DIR, 'chunks');
@@ -106,9 +107,9 @@ async function runCleanup() {
 
   const total = uploadsDeleted + chunkSessionsDeleted + processedDeleted;
   if (total > 0) {
-    console.log(
-      `[cleanup] removed ${total} item(s): ${uploadsDeleted} orphaned uploads, ` +
-        `${chunkSessionsDeleted} stale chunk sessions, ${processedDeleted} expired outputs`
+    logger.info(
+      { uploadsDeleted, chunkSessionsDeleted, processedDeleted, total },
+      'cleanup_run_completed'
     );
   }
 }

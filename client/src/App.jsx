@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import Dropzone from './components/Dropzone';
+import BatchDropzone from './components/BatchDropzone';
 import VideoPreview from './components/VideoPreview';
 import ExportControls, { RATIOS } from './components/ExportControls';
+import QuickActions from './components/QuickActions';
 import JobList from './components/JobList';
 import Toasts from './components/Toasts';
 import ThemeToggle from './components/ThemeToggle';
-import { cancelJob, chunkedUpload, createJob, deleteJob, getConfig, listJobs } from './api';
+import { cancelJob, chunkedUpload, createBatchJob, createJob, deleteJob, getConfig, listJobs } from './api';
 import { socket } from './socket';
 
 const SEARCH_DEBOUNCE_MS = 400;
@@ -54,6 +56,10 @@ export default function App() {
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchFiles, setBatchFiles] = useState([]);
+  const [batchUploading, setBatchUploading] = useState(false);
 
   const [jobs, setJobs] = useState([]);
   const [nextCursor, setNextCursor] = useState(null);
@@ -148,6 +154,164 @@ export default function App() {
       await cancelJob(jobId);
     } catch (err) {
       pushToast(`Couldn't cancel: ${err.message}`, 'error');
+    }
+  }
+
+  function handleToggleBatchMode() {
+    setBatchMode((prev) => !prev);
+    setFile(null);
+    setMetadata(null);
+    setBatchFiles([]);
+    setError(null);
+  }
+
+  async function handleBatchFilesSelected(files) {
+    setError(null);
+    const entries = files.map((f) => ({
+      file: f,
+      uploadId: null,
+      originalFilename: f.name,
+      status: 'pending',
+      error: null,
+    }));
+    setBatchFiles(entries);
+    setBatchUploading(true);
+
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+
+      if (config) {
+        const ext = entry.file.name.split('.').pop()?.toLowerCase();
+        if (!config.videoFormats.includes(ext)) {
+          setBatchFiles((prev) =>
+            prev.map((e, idx) => (idx === i ? { ...e, status: 'error', error: `Unsupported format .${ext}` } : e))
+          );
+          continue;
+        }
+        const maxBytes = config.maxFileSizeMB * 1024 * 1024;
+        if (entry.file.size > maxBytes) {
+          setBatchFiles((prev) =>
+            prev.map((e, idx) => (idx === i ? { ...e, status: 'error', error: `Exceeds ${config.maxFileSizeMB}MB` } : e))
+          );
+          continue;
+        }
+      }
+
+      setBatchFiles((prev) => prev.map((e, idx) => (idx === i ? { ...e, status: 'uploading' } : e)));
+      try {
+        const staged = await chunkedUpload(entry.file);
+        setBatchFiles((prev) =>
+          prev.map((e, idx) =>
+            idx === i
+              ? { ...e, status: 'done', uploadId: staged.uploadId, originalFilename: staged.originalFilename }
+              : e
+          )
+        );
+      } catch (err) {
+        setBatchFiles((prev) => prev.map((e, idx) => (idx === i ? { ...e, status: 'error', error: err.message } : e)));
+      }
+    }
+
+    setBatchUploading(false);
+  }
+
+  async function handleRunBatch() {
+    const ready = batchFiles.filter((e) => e.status === 'done' && e.uploadId);
+    if (ready.length === 0) {
+      setError('No successfully uploaded files to process yet.');
+      return;
+    }
+
+    setSubmitting(true);
+    setError(null);
+    try {
+      const { jobs: results } = await createBatchJob({
+        uploads: ready.map((e) => ({ uploadId: e.uploadId, originalFilename: e.originalFilename })),
+        outputFormat,
+        options: { quality, audioOnly },
+        retentionHours: retentionHours ?? undefined,
+        deleteOnDownload,
+      });
+
+      const newJobs = results
+        .filter((r) => r.jobId)
+        .map((r) => ({
+          jobId: r.jobId,
+          status: r.status,
+          progress: 0,
+          filename: ready.find((e) => e.uploadId === r.uploadId)?.originalFilename || r.uploadId,
+          transforms:
+            [audioOnly && 'audio only', quality < 100 && `quality ${quality}`].filter(Boolean).join(' · ') ||
+            'convert',
+          outputFormat,
+          createdAt: new Date().toISOString(),
+        }));
+      setJobs((prev) => [...newJobs, ...prev]);
+
+      const failed = results.filter((r) => r.error);
+      if (failed.length > 0) {
+        pushToast(`${failed.length} of ${results.length} file(s) failed to queue`, 'error');
+      }
+
+      setBatchFiles([]);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleGenerateThumbnail(timestamp) {
+    if (!metadata?.uploadId) return;
+    try {
+      const { jobId, status } = await createJob({
+        uploadId: metadata.uploadId,
+        originalFilename: metadata.originalFilename || file.name,
+        outputFormat: 'jpg',
+        kind: 'thumbnail',
+        options: { timestamp },
+      });
+      setJobs((prev) => [
+        {
+          jobId,
+          status,
+          progress: 0,
+          filename: file.name,
+          transforms: 'thumbnail',
+          outputFormat: 'jpg',
+          createdAt: new Date().toISOString(),
+        },
+        ...prev,
+      ]);
+    } catch (err) {
+      pushToast(`Couldn't generate thumbnail: ${err.message}`, 'error');
+    }
+  }
+
+  async function handleGenerateSpriteSheet({ frameCount, columns }) {
+    if (!metadata?.uploadId) return;
+    try {
+      const { jobId, status } = await createJob({
+        uploadId: metadata.uploadId,
+        originalFilename: metadata.originalFilename || file.name,
+        outputFormat: 'jpg',
+        kind: 'spritesheet',
+        options: { frameCount, columns },
+      });
+      setJobs((prev) => [
+        {
+          jobId,
+          status,
+          progress: 0,
+          filename: file.name,
+          transforms: 'sprite sheet',
+          outputFormat: 'jpg',
+          createdAt: new Date().toISOString(),
+        },
+        ...prev,
+      ]);
+    } catch (err) {
+      pushToast(`Couldn't generate sprite sheet: ${err.message}`, 'error');
     }
   }
 
@@ -328,16 +492,42 @@ export default function App() {
           Frame<span>Fusion</span>
         </h1>
         <div className="tagline">resize · quality · trim · convert — one export</div>
+        <button className="batch-toggle" onClick={handleToggleBatchMode}>
+          {batchMode ? 'Single file' : 'Batch mode'}
+        </button>
         <ThemeToggle theme={theme} onToggle={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))} />
       </div>
 
       <div className="top-grid">
-        <VideoPreview file={file} metadata={metadata} />
-        <Dropzone file={file} onSelect={handleFileSelect} videoFormats={config?.videoFormats} />
+        {batchMode ? (
+          <div className="card batch-summary-card">
+            <div className="batch-summary-title">
+              {batchFiles.length} file{batchFiles.length !== 1 ? 's' : ''} selected
+            </div>
+            <div className="batch-summary-sub">
+              {batchFiles.filter((e) => e.status === 'done').length} ready ·{' '}
+              {batchFiles.filter((e) => e.status === 'error').length} failed
+            </div>
+          </div>
+        ) : (
+          <VideoPreview file={file} metadata={metadata} />
+        )}
+
+        {batchMode ? (
+          <BatchDropzone
+            entries={batchFiles}
+            onFilesSelected={handleBatchFilesSelected}
+            videoFormats={config?.videoFormats}
+          />
+        ) : (
+          <Dropzone file={file} onSelect={handleFileSelect} videoFormats={config?.videoFormats} />
+        )}
       </div>
 
       <ExportControls
-        disabled={!file}
+        disabled={batchMode ? batchFiles.length === 0 : !file}
+        batchMode={batchMode}
+        saveLabel={batchMode ? `Save all (${batchFiles.filter((e) => e.status === 'done').length})` : undefined}
         resizeWidth={resizeWidth}
         resizeHeight={resizeHeight}
         onWidthChange={handleWidthChange}
@@ -365,9 +555,23 @@ export default function App() {
         uploadProgress={uploadProgress}
         submitting={submitting}
         error={error}
-        onRun={handleRun}
-        canRun={canRun}
+        onRun={batchMode ? handleRunBatch : handleRun}
+        canRun={
+          batchMode
+            ? batchFiles.some((e) => e.status === 'done') && !submitting && !batchUploading
+            : canRun
+        }
       />
+
+      {!batchMode && (
+        <QuickActions
+          disabled={!file || !metadata?.uploadId}
+          metadata={metadata}
+          onGenerateThumbnail={handleGenerateThumbnail}
+          onGenerateSpriteSheet={handleGenerateSpriteSheet}
+          busy={submitting}
+        />
+      )}
 
       <JobList
         jobs={jobs}
@@ -380,7 +584,9 @@ export default function App() {
         onSearchChange={setSearch}
         formatFilter={formatFilter}
         onFormatFilterChange={setFormatFilter}
-        supportedFormats={config ? [...config.videoFormats, ...config.audioFormats] : undefined}
+        supportedFormats={
+          config ? [...config.videoFormats, 'gif', ...config.audioFormats, ...config.imageFormats] : undefined
+        }
       />
 
       <Toasts toasts={toasts} onDismiss={dismissToast} />

@@ -1,11 +1,12 @@
 const fs = require('fs/promises');
 const { Worker } = require('bullmq');
 const { connection } = require('./queue');
-const { processVideo } = require('./ffmpegService');
+const { processVideo, generateThumbnail, generateSpriteSheet } = require('./ffmpegService');
 const Job = require('../models/Job');
 const { serializeJob } = require('../utils/serializeJob');
 const jobEvents = require('./jobEvents');
 const { onCancelRequested } = require('./cancelChannel');
+const logger = require('./logger');
 
 // Tracks the live ffmpeg command per job so a cancel request can kill it.
 // This only needs to live in this process now — the API process reaches it
@@ -26,6 +27,41 @@ async function emitFullUpdate(jobId) {
   if (job) jobEvents.publish(serializeJob(job));
 }
 
+async function runJob(job, jobId) {
+  const registerCommand = (command) => activeCommands.set(jobId, command);
+  const onProgress = async (percent) => {
+    await Job.findByIdAndUpdate(jobId, { progress: percent });
+    jobEvents.publish({ jobId, progress: percent, status: 'processing' });
+  };
+
+  if (job.kind === 'thumbnail') {
+    return generateThumbnail({
+      inputPath: job.inputPath,
+      timestamp: job.options?.timestamp,
+      registerCommand,
+      onProgress,
+    });
+  }
+
+  if (job.kind === 'spritesheet') {
+    return generateSpriteSheet({
+      inputPath: job.inputPath,
+      frameCount: job.options?.frameCount,
+      columns: job.options?.columns,
+      registerCommand,
+      onProgress,
+    });
+  }
+
+  return processVideo({
+    inputPath: job.inputPath,
+    outputFormat: job.outputFormat,
+    options: job.options,
+    onProgress,
+    registerCommand,
+  });
+}
+
 const worker = new Worker(
   'video-processing',
   async (bullJob) => {
@@ -42,21 +78,12 @@ const worker = new Worker(
 
     await Job.findByIdAndUpdate(jobId, { status: 'processing', progress: 0 });
     await emitFullUpdate(jobId);
-    console.log(`[job ${jobId}] processing started`);
+    logger.info({ jobId }, 'job_processing_started');
 
     const job = await Job.findById(jobId);
 
     try {
-      const outputPath = await processVideo({
-        inputPath,
-        outputFormat: job.outputFormat,
-        options: job.options,
-        onProgress: async (percent) => {
-          await Job.findByIdAndUpdate(jobId, { progress: percent });
-          jobEvents.publish({ jobId, progress: percent, status: 'processing' });
-        },
-        registerCommand: (command) => activeCommands.set(jobId, command),
-      });
+      const outputPath = await runJob(job, jobId);
 
       activeCommands.delete(jobId);
 
@@ -67,7 +94,7 @@ const worker = new Worker(
         completedAt: new Date(),
       });
       await emitFullUpdate(jobId);
-      console.log(`[job ${jobId}] done -> ${outputPath}`);
+      logger.info({ jobId, outputPath }, 'job_completed');
     } catch (err) {
       activeCommands.delete(jobId);
       const wasCancelled = cancelRequested.has(jobId);
@@ -78,7 +105,10 @@ const worker = new Worker(
         errorMessage: wasCancelled ? 'Cancelled by user' : err.message,
       });
       await emitFullUpdate(jobId);
-      console.error(`[job ${jobId}] ${wasCancelled ? 'cancelled' : 'failed'}:`, err.message);
+      logger[wasCancelled ? 'info' : 'error'](
+        { jobId, err: err.message },
+        wasCancelled ? 'job_cancelled' : 'job_failed'
+      );
     } finally {
       fs.unlink(inputPath).catch(() => {});
     }
@@ -86,6 +116,6 @@ const worker = new Worker(
   { connection }
 );
 
-worker.on('error', (err) => console.error('[worker] error:', err.message));
+worker.on('error', (err) => logger.error({ err: err.message }, 'worker_error'));
 
 module.exports = { worker };

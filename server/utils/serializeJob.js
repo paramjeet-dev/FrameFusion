@@ -1,6 +1,9 @@
 // Human-readable summary of what a job actually did, since it's no longer
 // a single named "operation" — e.g. "resize · quality 60 · trim".
-function summarizeTransforms(options = {}) {
+function summarizeTransforms(options = {}, kind = 'export') {
+  if (kind === 'thumbnail') return 'thumbnail';
+  if (kind === 'spritesheet') return 'sprite sheet';
+
   const parts = [];
   if (options.audioOnly) parts.push('audio only');
   if (options.resize) parts.push('resize');
@@ -16,7 +19,8 @@ function serializeJob(job) {
     progress: job.progress,
     errorMessage: job.errorMessage,
     filename: job.originalFilename,
-    transforms: summarizeTransforms(job.options),
+    kind: job.kind,
+    transforms: summarizeTransforms(job.options, job.kind),
     outputFormat: job.outputFormat,
     createdAt: job.createdAt,
     expired: job.expired,
@@ -26,4 +30,4 @@ function serializeJob(job) {
   };
 }
 
-module.exports = { serializeJob };
+module.exports = { serializeJob, summarizeTransforms };

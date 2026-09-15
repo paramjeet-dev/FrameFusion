@@ -2,6 +2,7 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const path = require('path');
 const fs = require('fs');
+const logger = require('./services/logger');
 
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/framefusion';
 
@@ -17,11 +18,11 @@ const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/framefusio
 mongoose
   .connect(MONGO_URI)
   .then(() => {
-    console.log('[worker] MongoDB connected');
+    logger.info('worker MongoDB connected');
     require('./services/worker'); // starts the BullMQ worker
-    console.log('[worker] listening for video-processing jobs');
+    logger.info('worker listening for video-processing jobs');
   })
   .catch((err) => {
-    console.error('[worker] MongoDB connection error:', err.message);
+    logger.fatal({ err: err.message }, 'worker_mongodb_connection_failed');
     process.exit(1);
   });

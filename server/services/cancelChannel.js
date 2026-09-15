@@ -1,4 +1,5 @@
 const { createPublisher, createSubscriber } = require('./redisPubSub');
+const logger = require('./logger');
 
 const CHANNEL = 'framefusion:cancel-requests';
 
@@ -23,7 +24,7 @@ function requestCancel(jobId) {
 function onCancelRequested(handler) {
   if (!subscribed) {
     subscriber.subscribe(CHANNEL).catch((err) => {
-      console.error('[cancelChannel] failed to subscribe:', err.message);
+      logger.error({ err: err.message }, 'cancel_channel_subscribe_failed');
     });
     subscribed = true;
   }

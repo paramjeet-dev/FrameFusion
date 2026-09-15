@@ -1,22 +1,61 @@
-const { VIDEO_FORMATS, AUDIO_FORMATS } = require('../models/Job');
+const { VIDEO_FORMATS, GIF_FORMAT, AUDIO_FORMATS, IMAGE_FORMATS } = require('../models/Job');
 
 /**
  * Returns an array of human-readable error messages (empty if valid).
- * `options.resize` and `options.trim` are optional — a job with neither is
- * just a quality/format pass. `options.quality` always applies (defaults to
- * 100 if omitted). `options.audioOnly` switches the valid outputFormat set
- * from video to audio formats and makes `resize` meaningless.
+ *
+ * `kind` changes what's valid entirely:
+ *  - 'export' (default): the normal resize/quality/trim/convert pipeline.
+ *    `resize` and `trim` are optional; `quality` defaults to 100;
+ *    `audioOnly` switches the valid outputFormat set to audio formats and
+ *    makes `resize` meaningless.
+ *  - 'thumbnail' / 'spritesheet': a still-image output. resize/quality/trim/
+ *    audioOnly don't apply at all — these have their own, much smaller
+ *    options shape (see models/Job.js).
  */
-function validateJobInput({ outputFormat, options = {} }) {
+function validateJobInput({ outputFormat, options = {}, kind = 'export' }) {
+  if (kind === 'thumbnail' || kind === 'spritesheet') {
+    return validateImageJob({ outputFormat, options, kind });
+  }
+  return validateExportJob({ outputFormat, options });
+}
+
+function validateImageJob({ outputFormat, options, kind }) {
+  const errors = [];
+
+  if (!IMAGE_FORMATS.includes(outputFormat)) {
+    errors.push(`outputFormat must be one of: ${IMAGE_FORMATS.join(', ')} for ${kind}`);
+  }
+
+  if (kind === 'thumbnail') {
+    const { timestamp } = options;
+    if (timestamp !== undefined && (!Number.isFinite(timestamp) || timestamp < 0)) {
+      errors.push('timestamp must be a non-negative number of seconds');
+    }
+  }
+
+  if (kind === 'spritesheet') {
+    const { frameCount, columns } = options;
+    if (frameCount !== undefined && (!Number.isInteger(frameCount) || frameCount < 1 || frameCount > 64)) {
+      errors.push('frameCount must be an integer between 1 and 64');
+    }
+    if (columns !== undefined && (!Number.isInteger(columns) || columns < 1 || columns > 16)) {
+      errors.push('columns must be an integer between 1 and 16');
+    }
+  }
+
+  return errors;
+}
+
+function validateExportJob({ outputFormat, options }) {
   const errors = [];
   const { resize, quality, trim, audioOnly } = options;
 
-  const validFormats = audioOnly ? AUDIO_FORMATS : VIDEO_FORMATS;
+  const validFormats = audioOnly ? AUDIO_FORMATS : [...VIDEO_FORMATS, GIF_FORMAT];
   if (!validFormats.includes(outputFormat)) {
     errors.push(
       audioOnly
         ? `outputFormat must be one of: ${AUDIO_FORMATS.join(', ')} when audioOnly is set`
-        : `outputFormat must be one of: ${VIDEO_FORMATS.join(', ')}`
+        : `outputFormat must be one of: ${VIDEO_FORMATS.join(', ')}, ${GIF_FORMAT}`
     );
   }
 

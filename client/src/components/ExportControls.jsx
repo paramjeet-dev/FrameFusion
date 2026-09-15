@@ -21,6 +21,8 @@ function NumberBox({ value, onChange, max, disabled }) {
 
 export default function ExportControls({
   disabled,
+  batchMode,
+  saveLabel,
   resizeWidth,
   resizeHeight,
   onWidthChange,
@@ -53,9 +55,10 @@ export default function ExportControls({
 }) {
   const outputFormats = audioOnly
     ? config?.audioFormats || FALLBACK_AUDIO_FORMATS
-    : config?.videoFormats || FALLBACK_VIDEO_FORMATS;
+    : [...(config?.videoFormats || FALLBACK_VIDEO_FORMATS), 'gif'];
   const defaultRetention = config?.defaultRetentionHours || 24;
-  const resolutionDisabled = disabled || audioOnly;
+  const resolutionDisabled = disabled || audioOnly || batchMode;
+  const durationDisabled = disabled || batchMode;
 
   return (
     <div className="controls-grid">
@@ -65,6 +68,7 @@ export default function ExportControls({
           <InfoIcon />
           <div className="field-icon-content">
             <div className="field-icon-label">Resolution</div>
+            {batchMode && <div className="field-note">Not available in batch mode</div>}
             <div className="dimension-row">
               <NumberBox value={resizeWidth} onChange={onWidthChange} disabled={resolutionDisabled} />
               <span className="dimension-x">x</span>
@@ -100,21 +104,22 @@ export default function ExportControls({
           <InfoIcon />
           <div className="field-icon-content">
             <div className="field-icon-label">Duration</div>
+            {batchMode && <div className="field-note">Not available in batch mode</div>}
             <div className="duration-row">
               <div className="duration-group">
-                <NumberBox value={trimStart.h} onChange={(v) => setTrimStart({ ...trimStart, h: v })} disabled={disabled} />
+                <NumberBox value={trimStart.h} onChange={(v) => setTrimStart({ ...trimStart, h: v })} disabled={durationDisabled} />
                 <span className="duration-sep">:</span>
-                <NumberBox value={trimStart.m} onChange={(v) => setTrimStart({ ...trimStart, m: v })} max={59} disabled={disabled} />
+                <NumberBox value={trimStart.m} onChange={(v) => setTrimStart({ ...trimStart, m: v })} max={59} disabled={durationDisabled} />
                 <span className="duration-sep">:</span>
-                <NumberBox value={trimStart.s} onChange={(v) => setTrimStart({ ...trimStart, s: v })} max={59} disabled={disabled} />
+                <NumberBox value={trimStart.s} onChange={(v) => setTrimStart({ ...trimStart, s: v })} max={59} disabled={durationDisabled} />
               </div>
               <span className="duration-to">to</span>
               <div className="duration-group">
-                <NumberBox value={trimEnd.h} onChange={(v) => setTrimEnd({ ...trimEnd, h: v })} disabled={disabled} />
+                <NumberBox value={trimEnd.h} onChange={(v) => setTrimEnd({ ...trimEnd, h: v })} disabled={durationDisabled} />
                 <span className="duration-sep">:</span>
-                <NumberBox value={trimEnd.m} onChange={(v) => setTrimEnd({ ...trimEnd, m: v })} max={59} disabled={disabled} />
+                <NumberBox value={trimEnd.m} onChange={(v) => setTrimEnd({ ...trimEnd, m: v })} max={59} disabled={durationDisabled} />
                 <span className="duration-sep">:</span>
-                <NumberBox value={trimEnd.s} onChange={(v) => setTrimEnd({ ...trimEnd, s: v })} max={59} disabled={disabled} />
+                <NumberBox value={trimEnd.s} onChange={(v) => setTrimEnd({ ...trimEnd, s: v })} max={59} disabled={durationDisabled} />
               </div>
             </div>
           </div>
@@ -143,7 +148,7 @@ export default function ExportControls({
           </div>
           <div className="select-field">
             <label htmlFor="ratio">Ratio</label>
-            <select id="ratio" value={ratio} onChange={(e) => onRatioChange(e.target.value)} disabled={audioOnly}>
+            <select id="ratio" value={ratio} onChange={(e) => onRatioChange(e.target.value)} disabled={audioOnly || batchMode}>
               <option value="variable">Variable</option>
               {Object.keys(RATIOS).map((key) => (
                 <option key={key} value={key}>
@@ -205,7 +210,7 @@ export default function ExportControls({
               />
               <path d="M8 3v5h7V3M8 21v-7h8v7" stroke="#fff" strokeWidth="1.6" strokeLinejoin="round" />
             </svg>
-            {submitting ? 'Starting…' : 'Save'}
+            {submitting ? 'Starting…' : saveLabel || 'Save'}
           </button>
         </div>
       </div>

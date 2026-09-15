@@ -5,6 +5,7 @@ export async function createJob({
   originalFilename,
   outputFormat,
   options,
+  kind,
   retentionHours,
   deleteOnDownload,
 }) {
@@ -16,6 +17,7 @@ export async function createJob({
       originalFilename,
       outputFormat,
       options,
+      kind,
       retentionHours,
       deleteOnDownload,
     }),
@@ -23,6 +25,17 @@ export async function createJob({
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Failed to start job');
   return data; // { jobId, status }
+}
+
+export async function createBatchJob({ uploads, outputFormat, options, kind, retentionHours, deleteOnDownload }) {
+  const res = await fetch(`${BASE}/batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uploads, outputFormat, options, kind, retentionHours, deleteOnDownload }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Failed to start batch');
+  return data; // { jobs: [{ uploadId, jobId, status } | { uploadId, error }] }
 }
 
 export async function getJobStatus(jobId) {
