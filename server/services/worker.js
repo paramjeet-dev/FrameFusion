@@ -48,6 +48,7 @@ async function runJob(job, jobId) {
       inputPath: job.inputPath,
       frameCount: job.options?.frameCount,
       columns: job.options?.columns,
+      cellWidth: job.options?.cellWidth,
       registerCommand,
       onProgress,
     });

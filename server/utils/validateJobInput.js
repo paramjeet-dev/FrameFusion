@@ -34,12 +34,15 @@ function validateImageJob({ outputFormat, options, kind }) {
   }
 
   if (kind === 'spritesheet') {
-    const { frameCount, columns } = options;
+    const { frameCount, columns, cellWidth } = options;
     if (frameCount !== undefined && (!Number.isInteger(frameCount) || frameCount < 1 || frameCount > 64)) {
       errors.push('frameCount must be an integer between 1 and 64');
     }
     if (columns !== undefined && (!Number.isInteger(columns) || columns < 1 || columns > 16)) {
       errors.push('columns must be an integer between 1 and 16');
+    }
+    if (cellWidth !== undefined && (!Number.isInteger(cellWidth) || cellWidth < 80 || cellWidth > 640)) {
+      errors.push('cellWidth must be an integer between 80 and 640');
     }
   }
 

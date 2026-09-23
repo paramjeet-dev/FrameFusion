@@ -160,7 +160,7 @@ async function generateThumbnail({ inputPath, timestamp, registerCommand, onProg
   const outPath = outputPathFor('jpg');
   const command = ffmpeg(inputPath)
     .seekInput(ts)
-    .outputOptions(['-frames:v 1', '-q:v 2'])
+    .outputOptions(['-frames:v 1', '-q:v 1']) // 1 = best JPEG quality (scale is 1-31, lower is better)
     .output(outPath);
 
   if (registerCommand) registerCommand(command);
@@ -174,16 +174,28 @@ async function generateThumbnail({ inputPath, timestamp, registerCommand, onProg
  * on a seek bar. Sampling rate is derived from frameCount/duration so the
  * frames land evenly spaced regardless of the source's actual framerate.
  */
-async function generateSpriteSheet({ inputPath, frameCount = 16, columns = 4, registerCommand, onProgress }) {
+async function generateSpriteSheet({
+  inputPath,
+  frameCount = 16,
+  columns = 4,
+  cellWidth = 320,
+  registerCommand,
+  onProgress,
+}) {
   const meta = await getMetadata(inputPath);
   const duration = meta.durationSeconds || 1;
   const rows = Math.ceil(frameCount / columns);
   const fps = frameCount / duration;
-  const cellWidth = 160;
 
   const outPath = outputPathFor('jpg');
-  const filter = `fps=${fps.toFixed(4)},scale=${cellWidth}:-1,tile=${columns}x${rows}`;
-  const command = ffmpeg(inputPath).outputOptions(['-vf', filter, '-frames:v 1']).output(outPath);
+  // scale first (never upscale past the source width), then tile. The
+  // earlier version left quality at ffmpeg's mediocre image2 default and
+  // capped cells at 160px — both made the sheet look soft/blocky regardless
+  // of source resolution.
+  const filter = `fps=${fps.toFixed(4)},scale='min(${cellWidth},iw)':-1:flags=lanczos,tile=${columns}x${rows}`;
+  const command = ffmpeg(inputPath)
+    .outputOptions(['-vf', filter, '-frames:v 1', '-q:v 2'])
+    .output(outPath);
 
   if (registerCommand) registerCommand(command);
   await runCommand(command, onProgress);

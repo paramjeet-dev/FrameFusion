@@ -113,4 +113,18 @@ describe('validateJobInput - spritesheet jobs', () => {
     const errors = validateJobInput({ outputFormat: 'jpg', options: { columns: 2.5 }, kind: 'spritesheet' });
     expect(errors.some((e) => e.includes('columns'))).toBe(true);
   });
+
+  it('rejects a cellWidth outside 80-640', () => {
+    expect(
+      validateJobInput({ outputFormat: 'jpg', options: { cellWidth: 40 }, kind: 'spritesheet' })
+    ).toEqual(expect.arrayContaining([expect.stringContaining('cellWidth')]));
+    expect(
+      validateJobInput({ outputFormat: 'jpg', options: { cellWidth: 1000 }, kind: 'spritesheet' })
+    ).toEqual(expect.arrayContaining([expect.stringContaining('cellWidth')]));
+  });
+
+  it('accepts a valid cellWidth', () => {
+    const errors = validateJobInput({ outputFormat: 'jpg', options: { cellWidth: 320 }, kind: 'spritesheet' });
+    expect(errors).toEqual([]);
+  });
 });
