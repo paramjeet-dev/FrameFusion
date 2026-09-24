@@ -49,6 +49,7 @@ async function runJob(job, jobId) {
       frameCount: job.options?.frameCount,
       columns: job.options?.columns,
       cellWidth: job.options?.cellWidth,
+      outputFormat: job.outputFormat,
       registerCommand,
       onProgress,
     });

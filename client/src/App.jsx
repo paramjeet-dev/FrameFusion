@@ -294,7 +294,7 @@ export default function App() {
       const { jobId, status } = await createJob({
         uploadId: metadata.uploadId,
         originalFilename: metadata.originalFilename || file.name,
-        outputFormat: 'jpg',
+        outputFormat: 'png', // lossless — sprite sheets default to max quality over file size
         kind: 'spritesheet',
         options: { frameCount, columns },
       });
@@ -305,7 +305,7 @@ export default function App() {
           progress: 0,
           filename: file.name,
           transforms: 'sprite sheet',
-          outputFormat: 'jpg',
+          outputFormat: 'png',
           createdAt: new Date().toISOString(),
         },
         ...prev,

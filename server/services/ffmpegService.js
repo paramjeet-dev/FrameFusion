@@ -178,7 +178,8 @@ async function generateSpriteSheet({
   inputPath,
   frameCount = 16,
   columns = 4,
-  cellWidth = 320,
+  cellWidth = 480,
+  outputFormat = 'png',
   registerCommand,
   onProgress,
 }) {
@@ -187,15 +188,18 @@ async function generateSpriteSheet({
   const rows = Math.ceil(frameCount / columns);
   const fps = frameCount / duration;
 
-  const outPath = outputPathFor('jpg');
-  // scale first (never upscale past the source width), then tile. The
-  // earlier version left quality at ffmpeg's mediocre image2 default and
-  // capped cells at 160px — both made the sheet look soft/blocky regardless
-  // of source resolution.
+  const outPath = outputPathFor(outputFormat);
+  // scale first (never upscale past the source width), then tile. Two
+  // earlier versions of this still left quality on the table: no quality
+  // flag at all (ffmpeg's mediocre image2 default), then a 160px cell cap,
+  // then JPEG at -q:v 1 — all still lossy. PNG is genuinely lossless, so
+  // that's the default now rather than tuning JPEG further.
   const filter = `fps=${fps.toFixed(4)},scale='min(${cellWidth},iw)':-1:flags=lanczos,tile=${columns}x${rows}`;
-  const command = ffmpeg(inputPath)
-    .outputOptions(['-vf', filter, '-frames:v 1', '-q:v 2'])
-    .output(outPath);
+  const outputOptions = ['-vf', filter, '-frames:v 1'];
+  if (outputFormat === 'jpg') {
+    outputOptions.push('-q:v 1'); // best JPEG quality, for anyone who explicitly wants the smaller lossy file
+  }
+  const command = ffmpeg(inputPath).outputOptions(outputOptions).output(outPath);
 
   if (registerCommand) registerCommand(command);
   await runCommand(command, onProgress);

@@ -174,7 +174,7 @@ JSON body: `{ "uploadId", "originalFilename", "outputFormat", "options", "kind",
   - `trim`: `{ "startTime": 5, "duration": 10 }` (seconds) or `null`/omitted to keep the full length
   - `audioOnly`: boolean, default `false` — strips the video stream entirely (`-vn`); `outputFormat` must then be an audio format
 - `options` for `kind: "thumbnail"`: `{ "timestamp": 12.5 }` (seconds, optional — defaults to the midpoint of the source)
-- `options` for `kind: "spritesheet"`: `{ "frameCount": 16, "columns": 4, "cellWidth": 320 }` (all optional — 1-64, 1-16, and 80-640 respectively) — samples `frameCount` frames evenly across the whole video and tiles them into one grid image, each cell scaled to `cellWidth` (never upscaled past the source)
+- `options` for `kind: "spritesheet"`: `{ "frameCount": 16, "columns": 4, "cellWidth": 480 }` (all optional — 1-64, 1-16, and 80-640 respectively) — samples `frameCount` frames evenly across the whole video and tiles them into one grid image, each cell scaled to `cellWidth` (never upscaled past the source). Defaults to lossless PNG (`outputFormat: "png"`); pass `"jpg"` explicitly for a smaller, lossy file.
 - `retentionHours` — optional; overrides `CLEANUP_MAX_AGE_HOURS` for this job's processed file
 - `deleteOnDownload` — optional, default `true`
 
@@ -270,10 +270,12 @@ every job hang at `processing` / 0% forever. Fixed by adding `.run()` in `runCom
 
 `generateSpriteSheet` also shipped with no JPEG quality flag at all (silently falling back to
 ffmpeg's mediocre image2 default) and a hardcoded 160px cell width — both made sprite sheets look
-soft/blocky regardless of source resolution. Fixed with an explicit `-q:v 2` and a 320px default
-`cellWidth` (configurable, capped so it never upscales past the source). `generateThumbnail`'s
-`-q:v` was bumped from `2` to `1` (best) while this was being looked at, since a single frame
-costs nothing to make as sharp as possible.
+soft/blocky regardless of source resolution. After a first pass (explicit `-q:v 2`, 320px cells)
+still wasn't sharp enough, it now defaults to **PNG** — genuinely lossless, not just a higher
+JPEG quality setting — with cells at 480px (still capped so it never upscales past the source).
+JPEG is still available by passing `outputFormat: "jpg"` explicitly, at `-q:v 1` (best). The
+frontend's sprite sheet quick action now requests PNG by default. `generateThumbnail`'s `-q:v`
+was similarly bumped from `2` to `1` while this was being looked at.
 
 ## Next Steps
 - [ ] True resumable uploads (resume after a page reload, not just mid-session retry)
