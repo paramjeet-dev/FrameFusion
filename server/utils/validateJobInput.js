@@ -41,8 +41,8 @@ function validateImageJob({ outputFormat, options, kind }) {
     if (columns !== undefined && (!Number.isInteger(columns) || columns < 1 || columns > 16)) {
       errors.push('columns must be an integer between 1 and 16');
     }
-    if (cellWidth !== undefined && (!Number.isInteger(cellWidth) || cellWidth < 80 || cellWidth > 640)) {
-      errors.push('cellWidth must be an integer between 80 and 640');
+    if (cellWidth !== undefined && (!Number.isInteger(cellWidth) || cellWidth < 80 || cellWidth > 3840)) {
+      errors.push('cellWidth must be an integer between 80 and 3840');
     }
   }
 

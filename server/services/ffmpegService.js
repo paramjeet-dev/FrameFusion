@@ -178,7 +178,7 @@ async function generateSpriteSheet({
   inputPath,
   frameCount = 16,
   columns = 4,
-  cellWidth = 480,
+  cellWidth, // omitted = don't downscale at all, see comment below
   outputFormat = 'png',
   registerCommand,
   onProgress,
@@ -189,12 +189,16 @@ async function generateSpriteSheet({
   const fps = frameCount / duration;
 
   const outPath = outputPathFor(outputFormat);
-  // scale first (never upscale past the source width), then tile. Two
-  // earlier versions of this still left quality on the table: no quality
-  // flag at all (ffmpeg's mediocre image2 default), then a 160px cell cap,
-  // then JPEG at -q:v 1 — all still lossy. PNG is genuinely lossless, so
-  // that's the default now rather than tuning JPEG further.
-  const filter = `fps=${fps.toFixed(4)},scale='min(${cellWidth},iw)':-1:flags=lanczos,tile=${columns}x${rows}`;
+  // Three earlier passes at this still left quality on the table: no
+  // quality flag at all, then a 160px cell cap, then a 480px cap with
+  // lossless PNG. But *any* fixed downscale is still a downscale — the
+  // real sharpness ceiling is the source's own per-frame resolution, so
+  // with no cellWidth given, skip the scale filter entirely and tile
+  // frames at native resolution. Passing cellWidth explicitly still works
+  // for anyone who wants a smaller, more manageable file instead (a full-res
+  // 4x4 sheet of 1080p frames is roughly 7680x4320 — several MB as PNG).
+  const scaleStage = cellWidth ? `,scale='min(${cellWidth},iw)':-1:flags=lanczos` : '';
+  const filter = `fps=${fps.toFixed(4)}${scaleStage},tile=${columns}x${rows}`;
   const outputOptions = ['-vf', filter, '-frames:v 1'];
   if (outputFormat === 'jpg') {
     outputOptions.push('-q:v 1'); // best JPEG quality, for anyone who explicitly wants the smaller lossy file
