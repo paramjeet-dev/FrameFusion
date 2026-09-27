@@ -1,0 +1,72 @@
+# Case A: everything runs locally under Docker, including Mongo and Redis.
+#
+#   docker compose up --build
+#
+# For the alternative case — external/managed Mongo and Redis driven by a
+# .env file — see docker-compose.external.yml and .env.docker.example.
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+  backend:
+    build: ./server
+    command: node server.js
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/framefusion
+      - REDIS_URL=redis://redis:6379
+      - UPLOAD_DIR=uploads
+      - PROCESSED_DIR=processed
+      - MAX_FILE_SIZE_MB=500
+      - CLEANUP_MAX_AGE_HOURS=24
+      - LOG_LEVEL=info
+    volumes:
+      - uploads:/app/uploads
+      - processed:/app/processed
+    depends_on:
+      - mongo
+      - redis
+
+  worker:
+    build: ./server
+    command: node worker.js
+    restart: unless-stopped
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/framefusion
+      - REDIS_URL=redis://redis:6379
+      - UPLOAD_DIR=uploads
+      - PROCESSED_DIR=processed
+    volumes:
+      - uploads:/app/uploads
+      - processed:/app/processed
+    depends_on:
+      - mongo
+      - redis
+
+  frontend:
+    build: ./client
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  mongo-data:
+  redis-data:
+  # Shared between backend and worker — both must see the same files,
+  # mirroring the "shared local disk" assumption noted in the main README.
+  uploads:
+  processed:

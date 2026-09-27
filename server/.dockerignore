@@ -1,0 +1,11 @@
+node_modules
+npm-debug.log
+uploads
+processed
+.env
+.env.example
+.git
+.gitignore
+tests
+jest.config.js
+nodemon.json

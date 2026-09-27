@@ -57,7 +57,8 @@ meaningfully — a candidate for a future integration-test pass with a tiny fixt
     it now infers that from the job's own `status` field in Mongo instead, which is equivalent.
   - Both processes assume **shared local disk** for `uploads/`/`processed/` — fine on one
     machine, but would need shared storage (S3 or similar) if the worker ever runs on a
-    different host than the API.
+    different host than the API. Under Docker, this is satisfied by mounting the same named
+    volumes into both the `backend` and `worker` containers (see "Running with Docker" below).
 - **Codec selection is format-aware.** `webm` output uses `libvpx-vp9` + `libopus` with explicit
   speed flags (`-deadline good -cpu-used 4 -row-mt 1`); other video formats use `libx264` + `aac`;
   audio-only exports use `libmp3lame`/`aac`/`pcm_s16le`/`flac` depending on the target format,
@@ -144,6 +145,55 @@ npm run dev   # runs on http://localhost:5173, proxies /api to :5000
 The Socket.IO client connects directly to `http://localhost:5000` in dev (Vite's `/api` proxy
 only covers HTTP, not the WebSocket upgrade) — see `client/src/socket.js`.
 
+## Running with Docker
+
+The whole stack — API, worker, frontend, and (optionally) Mongo/Redis — can run under Docker
+instead of the manual two-terminal setup above. Two compose files are provided depending on
+where your databases live.
+
+**Images:** `server/Dockerfile` builds a single image shared by both the `backend` and `worker`
+services (same codebase, different `command:`). It's pinned to `node:20-slim`, **not** an Alpine
+base — `@ffmpeg-installer/ffmpeg` and `@ffprobe-installer/ffprobe` download prebuilt
+glibc-linked binaries on `npm install`, and those won't execute against Alpine's musl libc.
+`client/Dockerfile` is a multi-stage build: Vite builds the static bundle, then nginx serves it
+and reverse-proxies `/api` and `/socket.io/` to the backend container (see `client/nginx.conf`)
+so the existing same-origin Socket.IO client code (`client/src/socket.js`) works unmodified in
+production — no separate WebSocket host needed the way dev mode requires.
+
+**Shared disk:** `backend` and `worker` mount the same `uploads` and `processed` named volumes,
+which is the containerized equivalent of the "shared local disk" assumption already noted above
+in Architecture — both processes must see the same files.
+
+### Case A — Mongo and Redis run in Docker too
+
+```bash
+docker compose up --build
+```
+
+This starts `mongo`, `redis`, `backend` (port 5000), `worker`, and `frontend` (port 3000, via
+nginx). Service names double as hostnames on the Docker network, so `backend`/`worker` connect
+to `mongodb://mongo:27017/framefusion` and `redis://redis:6379` rather than `localhost`. Data
+persists in the `mongo-data`/`redis-data` named volumes across restarts.
+
+### Case B — Mongo and Redis are external (Atlas, Upstash, a managed box, etc.)
+
+```bash
+cp .env.docker.example .env
+# edit .env with your real MONGO_URI / REDIS_URL
+docker compose -f docker-compose.external.yml up --build
+```
+
+This starts only `backend`, `worker`, and `frontend` — no database containers — and loads
+connection details from `.env` via `env_file`. Everything else (shared volumes, the nginx proxy,
+the image build) is identical to Case A.
+
+### Notes
+- Rebuild after dependency or code changes: `docker compose up --build` (add `-f
+  docker-compose.external.yml` for Case B).
+- `backend` exposes a Docker `HEALTHCHECK` against the existing `GET /api/health` route.
+- Tests (`npm test` in `server/`) are not run inside these containers — run them locally or wire
+  them into CI separately; the Docker images are for running the app, not the test suite.
+
 ## Design
 Redesigned to match a reference UI the user provided: a light theme with a purple accent
 (`#5b4fe8`), card-based layout, and — the bigger change — a single unified export panel instead
@@ -190,3 +240,4 @@ dark-theme design rather than a pure reference copy.
 - [ ] Batch mode support for per-file resize/trim (currently intentionally shared-settings-only — see the Batch Processing note in Architecture)
 - [ ] Sprite sheet click-to-seek in the UI — right now the generated image downloads as a plain file rather than being used as an actual scrubbing preview
 - [ ] Basic auth + rate-limit-by-user (rather than by IP) if this ever leaves single-user/localhost use
+- [ ] Wire the Docker images into CI so `npm test` runs against the same environment they're built from

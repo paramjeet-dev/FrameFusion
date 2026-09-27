@@ -1,0 +1,44 @@
+# Case B: Mongo and Redis are external/managed services (Atlas, Upstash,
+# a remote box, etc.) — connection details come from .env, and no
+# database containers are started here.
+#
+#   cp .env.docker.example .env    # then fill in real MONGO_URI / REDIS_URL
+#   docker compose -f docker-compose.external.yml up --build
+
+services:
+  backend:
+    build: ./server
+    command: node server.js
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    volumes:
+      - uploads:/app/uploads
+      - processed:/app/processed
+
+  worker:
+    build: ./server
+    command: node worker.js
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - uploads:/app/uploads
+      - processed:/app/processed
+
+  frontend:
+    build: ./client
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  # Still shared between backend and worker even though the databases are
+  # external — the "shared local disk" assumption for uploads/processed
+  # applies regardless of where Mongo/Redis live.
+  uploads:
+  processed:
