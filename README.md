@@ -133,89 +133,6 @@ fetch" or "Unexpected end of JSON input" (the connection gets cut mid-response).
 `dev:worker` too, since it's the worker process writing those files — the same `nodemon.json` in
 `server/` covers both scripts automatically.
 
-## API
-
-### `GET /api/config`
-Returns `{ maxFileSizeMB, videoFormats, audioFormats, imageFormats, defaultRetentionHours }`. The
-frontend reads this once on load so client-side validation and dropdowns stay in sync with the
-server. `videoFormats` is also what uploads are validated against — the source file is always a
-video, even for an audio-only export or a thumbnail/spritesheet job. `imageFormats` (`jpg`, `png`)
-are output-only, for thumbnail/spritesheet jobs.
-
-### Uploads
-Two ways to get a file onto the server; both end with the same response shape:
-`{ "uploadId", "originalFilename", "durationSeconds", "sizeBytes", "width", "height", "codec" }`.
-Both also run the file through content-type verification (`detectFileType.js`) before probing it
-— an upload whose bytes don't match its claimed extension is rejected with a specific error.
-
-- **`POST /api/uploads`** — single multipart request (`file` field).
-- **Chunked** (what the frontend actually uses):
-  1. `POST /api/uploads/init` — JSON `{ filename, totalChunks }` returns `{ uploadId }`
-  2. `POST /api/uploads/:uploadId/chunk/:index` — raw binary body, one request per chunk (2MB
-     chunks from the client), returns `204` per chunk
-  3. `POST /api/uploads/:uploadId/complete` — assembles the chunks in order, probes the result,
-     returns the same metadata shape as above
-
-  Not resumable across a page reload — but real upload progress, and a single flaky request
-  doesn't fail the whole transfer.
-
-All upload endpoints are rate limited together: 300 requests / 15 min per IP.
-
-### `POST /api/jobs`
-JSON body: `{ "uploadId", "originalFilename", "outputFormat", "options", "kind", "retentionHours", "deleteOnDownload" }`
-- `uploadId` — from a prior upload call
-- `kind` — optional, default `"export"`. `"thumbnail"` or `"spritesheet"` produce a still image instead — see below.
-- `outputFormat` — depends on `kind`:
-  - `export` (default): `mp4`, `mov`, `avi`, `flv`, `m4v`, `webm`, `gif` (video), or `mp3`, `aac`, `wav`, `flac` (requires `options.audioOnly: true`)
-  - `thumbnail` / `spritesheet`: `jpg` or `png`
-- `options` for `kind: "export"` — any combination, all optional except quality (which always applies):
-  - `resize`: `{ "width": 1280, "height": 720, "preserveAspectRatio": true }` or `null`/omitted to keep the source resolution — rejected if `audioOnly` is set (no video stream to resize), ignored for `gif` beyond capping the default size
-  - `quality`: `0-100`, default `100` — CRF for video (`qualityToCrf()`), bitrate 64-320kbps for audio-only (`qualityToAudioBitrateKbps()`), or sample fps 5-15 for gif (`qualityToGifFps()`) — all in `ffmpegService.js`
-  - `trim`: `{ "startTime": 5, "duration": 10 }` (seconds) or `null`/omitted to keep the full length
-  - `audioOnly`: boolean, default `false` — strips the video stream entirely (`-vn`); `outputFormat` must then be an audio format
-- `options` for `kind: "thumbnail"`: `{ "timestamp": 12.5 }` (seconds, optional — defaults to the midpoint of the source)
-- `options` for `kind: "spritesheet"`: `{ "frameCount": 16, "columns": 4, "cellWidth": 480 }` (all optional — 1-64, 1-16, and 80-3840 respectively) — samples `frameCount` frames evenly across the whole video and tiles them into one grid image. **Omit `cellWidth` for native source resolution per frame** (the actual sharpness ceiling — nothing scales down at all); pass it explicitly for a smaller, more manageable file instead. Defaults to lossless PNG (`outputFormat: "png"`); pass `"jpg"` explicitly for a smaller, lossy file.
-- `retentionHours` — optional; overrides `CLEANUP_MAX_AGE_HOURS` for this job's processed file
-- `deleteOnDownload` — optional, default `true`
-
-Response: `{ "jobId", "status" }`. Enqueues onto BullMQ and returns immediately. Rate limited to
-20 jobs / 15 min per IP.
-
-### `POST /api/jobs/batch`
-JSON body: `{ "uploads": [{ "uploadId", "originalFilename" }, ...], "outputFormat", "options", "kind", "retentionHours", "deleteOnDownload" }`
-
-Creates one job per upload, all sharing the same export settings — up to 20 files per batch.
-Each upload validates and enqueues independently via the same `jobCreationService` used by the
-single-job endpoint, so one bad file in the batch doesn't block the rest.
-
-Response: `{ "jobs": [{ "uploadId", "jobId", "status" } | { "uploadId", "error" }] }` — always
-`201` if at least one file succeeded, `400` if all of them failed validation. Rate limited to 5
-batches / 15 min per IP (looser per-request than the single-job limit, since one batch already
-represents several files).
-
-### `GET /api/jobs/:id`
-Response: `{ "jobId", "status", "progress", "errorMessage", "filename", "kind", "transforms", "outputFormat", "createdAt", "expired", "retentionHours", "deleteOnDownload", "downloadUrl" }`
-
-`transforms` is a short human-readable summary of what the job actually did (e.g. `"resize · quality 60 · trim"`, `"audio only · trim"`, `"thumbnail"`, `"sprite sheet"`, or `"convert"` if none of the optional export transforms were used) — there's no single `operation` field anymore since a job can combine any mix.
-
-`status` is one of `pending`, `processing`, `done`, `failed`, `cancelled`.
-
-### `GET /api/jobs?limit=20&cursor=<jobId>&search=<text>&format=<ext>`
-Cursor-paginated job history, newest first. `search` matches filenames case-insensitively;
-`format` filters by output format exactly (works for `gif`/`jpg`/`png` too, not just video/audio).
-
-### `GET /api/jobs/:id/download`
-Streams the processed file. `410` if expired. Deletes the file immediately after a successful
-transfer if `deleteOnDownload` is `true`.
-
-### `POST /api/jobs/:id/cancel`
-Cancels a `pending` or `processing` job. Response: `{ "jobId", "cancelRequested": true, "state": "active" | "queued" }`.
-
-### `DELETE /api/jobs/:id`
-Removes a job from the log and deletes any of its files still on disk.
-
-### WebSocket: `job:update`
-Emitted to all connected clients on every status/progress change — the frontend doesn't poll at all.
 
 ## Frontend Setup
 ```bash
@@ -263,23 +180,7 @@ Typography is Inter for UI text with IBM Plex Mono reserved for anything measure
 resolution, percentages, filenames) — a small distinctive touch carried over from the previous
 dark-theme design rather than a pure reference copy.
 
-## Known Bug Fixed (earlier version)
-The original FFmpeg wrapper attached `progress`/`end`/`error` listeners but never called
-`command.run()` — `fluent-ffmpeg`'s `.output()` doesn't start execution on its own. This made
-every job hang at `processing` / 0% forever. Fixed by adding `.run()` in `runCommand()`.
-
-`generateSpriteSheet` went through several rounds getting to genuinely max quality: no JPEG
-quality flag at all → explicit `-q:v 2` at 320px cells → lossless PNG at 480px cells → and
-finally, dropping the forced downscale entirely. Any fixed cell width is still a downscale no
-matter how good the resize algorithm; the real sharpness ceiling is each frame's native
-resolution. So `cellWidth` is no longer defaulted — omit it and frames tile at full source
-resolution (a 4x4 sheet of 1080p source frames comes out ~7680x4320); pass it explicitly only if
-you want a smaller, more manageable file. Still defaults to lossless PNG; JPEG at `-q:v 1` (best)
-is available via `outputFormat: "jpg"`. `generateThumbnail`'s `-q:v` was similarly bumped from
-`2` to `1` while this was being looked at.
-
 ## Next Steps
-- [ ] True resumable uploads (resume after a page reload, not just mid-session retry)
 - [ ] Per-job concurrency limits / priority in the BullMQ queue
 - [ ] Reconnection handling: a reconciliation fetch on socket reconnect, in case updates were missed while disconnected
 - [ ] Live preview of trim range against the actual video (currently just numeric h:m:s inputs)
